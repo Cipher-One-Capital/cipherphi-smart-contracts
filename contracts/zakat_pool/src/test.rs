@@ -876,6 +876,24 @@ fn expiry_at_the_current_ledger_is_refused() {
 }
 
 #[test]
+fn a_payout_of_the_whole_bucket_is_allowed() {
+    let f = setup();
+    f.give();
+    let index = Category::Wayfarers as u32;
+    let whole = f.client().balances(&f.asset).get_unchecked(index);
+    let signed = f.signed(&f.payload(Category::Wayfarers, whole, 0), &[0, 1]);
+    f.client().distribute(
+        &f.recipient,
+        &f.asset,
+        &whole,
+        &Category::Wayfarers,
+        &signed,
+    );
+    assert_eq!(f.client().balances(&f.asset).get_unchecked(index), 0);
+    assert_eq!(f.token().balance(&f.recipient), whole);
+}
+
+#[test]
 fn an_empty_bucket_is_refused() {
     let f = setup();
     f.give();

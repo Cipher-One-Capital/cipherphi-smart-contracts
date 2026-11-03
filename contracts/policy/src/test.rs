@@ -237,6 +237,26 @@ fn a_rate_outside_its_band_is_refused() {
     refused_at_construction(&PLACEHOLDER, Category::Poor, p, Error::RateOutOfBand);
 }
 
+/// Every bound is inclusive: a value exactly at its limit is accepted.
+#[test]
+fn values_exactly_at_their_bounds_are_accepted() {
+    let env = Env::default();
+    let controller = Address::generate(&env);
+    let split = allocation(&env, &PLACEHOLDER, Category::Poor);
+    let administrators = PLACEHOLDER[Category::Administrators as usize];
+
+    let mut at_band = parameters();
+    at_band.amil_cap_bps = MAX_AMIL_CAP_BPS;
+    at_band.rate_bps = MAX_RATE_BPS;
+    let mut at_share = parameters();
+    at_share.amil_cap_bps = administrators;
+
+    for p in [at_band, at_share] {
+        let id = env.register(Policy, PolicyArgs::__constructor(&controller, &split, &p));
+        assert_eq!(PolicyClient::new(&env, &id).parameters(), p);
+    }
+}
+
 #[test]
 fn an_administrators_share_above_the_cap_is_refused() {
     let mut p = parameters();
