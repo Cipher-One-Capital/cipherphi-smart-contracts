@@ -8,9 +8,9 @@
 //!
 //! `policy` and `attestation` are pinned here and treated as untrusted. A split
 //! is rejected unless it has exactly 8 elements, each zero or positive, summing
-//! exactly to the amount received. A payout is rejected unless the attestation
-//! verifies, and this contract checks every binding itself rather than relying
-//! on the verifier to have looked.
+//! exactly to the amount received. A payout is rejected unless the approval
+//! account that `attestation` names authorised it, and this contract checks
+//! every binding of the approval itself.
 //!
 //! Neither value-moving function extends a TTL. Rent is paid by the scheduled
 //! job from the treasury, so it can never land on a donor's transaction.
@@ -24,11 +24,11 @@ mod test;
 
 mod types;
 
-pub use cipherphi_interface::{Attestation, Category, SignedAttestation, SignerSig};
+pub use cipherphi_interface::{Attestation, Category};
 pub use types::*;
 
-use cipherphi_interface::{AttestationClient, AttestationError, PolicyClient, CATEGORY_COUNT};
-use soroban_sdk::{contract, contractimpl, token, xdr::ToXdr, Address, Env, Vec};
+use cipherphi_interface::{AttestationClient, PolicyClient, CATEGORY_COUNT};
+use soroban_sdk::{contract, contractimpl, token, xdr::ToXdr, Address, Env, IntoVal, Vec};
 
 /// 7 days at 5 seconds a ledger. A constructor cannot set a shorter delay.
 pub const MIN_TIMELOCK_LEDGERS: u32 = 120_960;
@@ -128,7 +128,12 @@ impl ZakatPool {
         Ok(())
     }
 
-    /// Pay out of the pool against a quorum-signed attestation.
+    /// Pay out of the pool against an approval.
+    ///
+    /// Two addresses authorise the call: the distributor, and the approval
+    /// account over `attestation` alone. The approval account is a Stellar
+    /// multisig, so Stellar refuses the call unless its signers reach the
+    /// account's threshold, 2 of 3, before any of this runs.
     ///
     /// Not stopped by the contribution pause: a pause must not strand what the
     /// pool already holds.
@@ -138,10 +143,11 @@ impl ZakatPool {
         asset: Address,
         amount: i128,
         category: Category,
-        attestation: SignedAttestation,
+        attestation: Attestation,
     ) -> Result<(), Error> {
         // 1. The distributor, and not disabled.
-        Self::distributor(env.clone()).require_auth();
+        let distributor = Self::distributor(env.clone());
+        distributor.require_auth();
         if flag(&env, &DataKey::DistributorDisabled) {
             return Err(Error::DistributorDisabled);
         }
@@ -158,12 +164,10 @@ impl ZakatPool {
             return Err(Error::SelfDistribution);
         }
 
-        // 3. The attestation. Every binding is checked here, each with its own
-        //    error, and only then is the verifier consulted.
-        let SignedAttestation {
-            payload,
-            signatures,
-        } = attestation;
+        // 3. The approval. Every binding is checked here, each with its own
+        //    error, and only then is the approval account's authorisation
+        //    required.
+        let payload = attestation;
         if payload.recipient != recipient
             || payload.category != category
             || payload.amount != amount
@@ -186,7 +190,11 @@ impl ZakatPool {
         if payload.sequence != sequence {
             return Err(Error::SequenceMismatch);
         }
-        verify(&env, &payload, &signatures)?;
+        let authority = authority(&env)?;
+        if authority == distributor || authority == Self::governance(env.clone()) {
+            return Err(Error::RolesOverlap);
+        }
+        authority.require_auth_for_args((payload.clone(),).into_val(&env));
 
         // 4. The bucket holds the amount.
         let index = category as u32;
@@ -468,13 +476,12 @@ fn allocation(env: &Env, amount: i128) -> Result<Vec<i128>, Error> {
     Ok(split)
 }
 
-/// Ask `attestation` to verify. Only a clean unit return counts as yes.
-fn verify(env: &Env, payload: &Attestation, signatures: &Vec<SignerSig>) -> Result<(), Error> {
+/// Ask `attestation` for the approval account. Anything but an address is a
+/// refusal.
+fn authority(env: &Env) -> Result<Address, Error> {
     let address = ZakatPool::attestation(env.clone());
-    match AttestationClient::new(env, &address).try_verify(payload, signatures) {
-        Ok(Ok(())) => Ok(()),
-        Err(Ok(AttestationError::ThresholdNotMet)) => Err(Error::ThresholdNotMet),
-        Err(Ok(AttestationError::UnknownSigner)) => Err(Error::UnknownSigner),
+    match AttestationClient::new(env, &address).try_authority() {
+        Ok(Ok(authority)) => Ok(authority),
         _ => Err(Error::AttestationRejected),
     }
 }

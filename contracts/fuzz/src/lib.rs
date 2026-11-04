@@ -4,14 +4,13 @@
 //! solvency invariant they assert after every call.
 
 use attestation::{Attestation as AttestationContract, AttestationArgs};
-use ed25519_dalek::{Signer, SigningKey};
 use policy::{Allocation, DischargeTiming, NisabBasis, Parameters, Policy, PolicyArgs};
 use soroban_sdk::{
-    testutils::Address as _, testutils::Ledger, token, xdr::ToXdr, Address, BytesN, Env, Vec,
+    testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
+    token, Address, Env, IntoVal, InvokeError, Vec,
 };
 use zakat_pool::{
-    Attestation, Category, SignedAttestation, SignerSig, ZakatPool, ZakatPoolArgs, ZakatPoolClient,
-    MIN_TIMELOCK_LEDGERS,
+    Attestation, Category, Error, ZakatPool, ZakatPoolArgs, ZakatPoolClient, MIN_TIMELOCK_LEDGERS,
 };
 
 pub const START_LEDGER: u32 = 100;
@@ -32,7 +31,8 @@ pub struct Harness {
     pub asset: Address,
     pub donor: Address,
     pub recipient: Address,
-    pub signers: std::vec::Vec<SigningKey>,
+    pub distributor: Address,
+    pub authority: Address,
 }
 
 impl Harness {
@@ -49,14 +49,10 @@ impl Harness {
             .address();
         token::StellarAssetClient::new(&env, &asset).mint(&donor, &(i64::MAX as i128));
 
-        let signers: std::vec::Vec<SigningKey> = [[11u8; 32], [22u8; 32], [33u8; 32]]
-            .iter()
-            .map(SigningKey::from_bytes)
-            .collect();
-        let mut authority = Vec::new(&env);
-        for signer in &signers {
-            authority.push_back(BytesN::from_array(&env, &signer.verifying_key().to_bytes()));
-        }
+        let distributor = Address::generate(&env);
+        // The approval account. Its 2-of-3 threshold is Stellar's to enforce
+        // and is not modelled here; the harness models whether it approved.
+        let authority = Address::generate(&env);
 
         let pool = Address::generate(&env);
         let policy = env.register(
@@ -77,14 +73,14 @@ impl Harness {
         );
         let attestation = env.register(
             AttestationContract,
-            AttestationArgs::__constructor(&authority, &2),
+            AttestationArgs::__constructor(&authority),
         );
         env.register_at(
             &pool,
             ZakatPool,
             ZakatPoolArgs::__constructor(
                 &Address::generate(&env),
-                &Address::generate(&env),
+                &distributor,
                 &policy,
                 &attestation,
                 &asset,
@@ -98,7 +94,8 @@ impl Harness {
             asset,
             donor,
             recipient,
-            signers,
+            distributor,
+            authority,
         }
     }
 
@@ -122,20 +119,49 @@ impl Harness {
         assert!(self.client().balances(&self.asset).iter().all(|b| b >= 0));
     }
 
-    pub fn sign(&self, payload: &Attestation, signer_mask: u8) -> SignedAttestation {
-        let message: std::vec::Vec<u8> = payload.clone().to_xdr(&self.env).iter().collect();
-        let mut signatures = Vec::new(&self.env);
-        for (index, key) in self.signers.iter().enumerate() {
-            if signer_mask & (1 << index) != 0 {
-                signatures.push_back(SignerSig {
-                    index: index as u32,
-                    signature: BytesN::from_array(&self.env, &key.sign(&message).to_bytes()),
-                });
-            }
+    /// Attempt a payout authorised by the distributor and, if `approved`, by the
+    /// approval account over `payload`. Without its approval the call fails.
+    pub fn try_distribute(
+        &self,
+        category: Category,
+        amount: i128,
+        payload: &Attestation,
+        approved: bool,
+    ) -> Result<Result<(), soroban_sdk::ConversionError>, Result<Error, InvokeError>> {
+        let full = MockAuthInvoke {
+            contract: &self.pool,
+            fn_name: "distribute",
+            args: (
+                self.recipient.clone(),
+                self.asset.clone(),
+                amount,
+                category,
+                payload.clone(),
+            )
+                .into_val(&self.env),
+            sub_invokes: &[],
+        };
+        let approval = MockAuthInvoke {
+            contract: &self.pool,
+            fn_name: "distribute",
+            args: (payload.clone(),).into_val(&self.env),
+            sub_invokes: &[],
+        };
+        let mut mocks = std::vec![MockAuth {
+            address: &self.distributor,
+            invoke: &full,
+        }];
+        if approved {
+            mocks.push(MockAuth {
+                address: &self.authority,
+                invoke: &approval,
+            });
         }
-        SignedAttestation {
-            payload: payload.clone(),
-            signatures,
-        }
+        self.env.mock_auths(&mocks);
+        let result =
+            self.client()
+                .try_distribute(&self.recipient, &self.asset, &amount, &category, payload);
+        self.env.mock_all_auths();
+        result
     }
 }

@@ -322,7 +322,6 @@ version = "0.0.0"
 dependencies = [
  "attestation",
  "cipherphi_interface",
- "ed25519-dalek",
  "libfuzzer-sys",
  "policy",
  "soroban-sdk",

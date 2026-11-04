@@ -7,7 +7,7 @@
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracterror, contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env, Vec};
 
 /// Number of zakat categories, and of elements in every split.
 pub const CATEGORY_COUNT: u32 = 8;
@@ -37,9 +37,11 @@ pub enum Category {
     Wayfarers = 7,
 }
 
-/// The off-chain approval. XDR-serialized, and those bytes are what the
-/// authority keys sign, so every field is bound by the signature. The encoding
-/// is the demo's, unchanged: see `test_vectors/attestation.json`.
+/// The approval for one payout. The approval account authorises `distribute`
+/// with this struct as the only argument, so every field is bound by its
+/// signers' signatures, and Stellar enforces the account's threshold. Its XDR,
+/// hashed, is the `attestation_hash` of the Disbursement event. The encoding is
+/// the demo's, unchanged: see `test_vectors/attestation.json`.
 ///
 /// | Field | What an attacker gets if it is not bound |
 /// | --- | --- |
@@ -62,22 +64,6 @@ pub struct Attestation {
     pub expiry_ledger: u32,
     pub pool: Address,
     pub network_id: BytesN<32>,
-}
-
-/// One authority signature, as (position in the authority vector, signature).
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SignerSig {
-    pub index: u32,
-    pub signature: BytesN<64>,
-}
-
-/// The `attestation` argument of `distribute`: the payload and its signatures.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SignedAttestation {
-    pub payload: Attestation,
-    pub signatures: Vec<SignerSig>,
 }
 
 /// The category split. A placeholder until the Shariah authority validates it.
@@ -120,21 +106,6 @@ pub struct Parameters {
     pub discharge_timing: DischargeTiming,
 }
 
-/// The refusals of `attestation.verify`. The numbers match the pool's own.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum AttestationError {
-    /// Threshold of zero, or above the key count.
-    InvalidThreshold = 1,
-    /// A signature index outside the authority vector.
-    UnknownSigner = 11,
-    /// Fewer than `threshold` distinct authority keys signed.
-    ThresholdNotMet = 12,
-    /// The same key appears twice in the constructor's key vector.
-    DuplicateAuthorityKey = 15,
-}
-
 /// What `zakat_pool` needs from `policy`.
 #[contractclient(name = "PolicyClient")]
 pub trait PolicyInterface {
@@ -151,10 +122,7 @@ pub trait PolicyInterface {
 /// What `zakat_pool` needs from `attestation`.
 #[contractclient(name = "AttestationClient")]
 pub trait AttestationInterface {
-    /// Succeed only if a quorum of the authority signed `payload`'s XDR.
-    fn verify(
-        env: Env,
-        payload: Attestation,
-        signatures: Vec<SignerSig>,
-    ) -> Result<(), AttestationError>;
+    /// The approval account: a Stellar account whose signers and threshold
+    /// decide whether a payout is approved.
+    fn authority(env: Env) -> Address;
 }

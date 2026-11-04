@@ -69,10 +69,9 @@ pub enum Error {
     Expired = 9,
     /// Replay, or a sequence from the future.
     SequenceMismatch = 10,
-    /// A signature index outside the authority vector.
-    UnknownSigner = 11,
-    /// Fewer than the threshold of distinct authority keys signed.
-    ThresholdNotMet = 12,
+    // 11 and 12 were `UnknownSigner` and `ThresholdNotMet`, from when this
+    // contract counted signatures itself. The approval account's own threshold
+    // now refuses a short quorum, before the contract runs. Retired, not reused.
     /// The category bucket does not hold the amount.
     InsufficientBucket = 13,
     /// The buckets claim more than the pool holds.
@@ -93,7 +92,7 @@ pub enum Error {
     NoPendingChange = 22,
     /// The ledger has not passed the change's `execute_after`.
     TimelockNotElapsed = 23,
-    /// `attestation` refused or returned nonsense: a bad signature, for one.
+    /// `attestation` did not answer with an address.
     AttestationRejected = 24,
     /// The token moved a different amount from the one asked for.
     TransferShortfall = 25,
@@ -101,7 +100,8 @@ pub enum Error {
     AssetAlreadyApproved = 26,
     /// `policy` refused a queued value.
     PolicyRefused = 27,
-    /// Governance and the distributor would be the same address.
+    /// Two of governance, the distributor and the approval account would be
+    /// the same address.
     RolesOverlap = 28,
     /// The `policy` being pointed to does not name this pool as its controller.
     PolicyControllerMismatch = 29,
