@@ -185,7 +185,6 @@ name = "attestation"
 version = "0.1.0"
 dependencies = [
  "cipherphi_interface",
- "ed25519-dalek",
  "soroban-sdk",
 ]
 
@@ -2097,7 +2096,6 @@ version = "0.1.0"
 dependencies = [
  "attestation",
  "cipherphi_interface",
- "ed25519-dalek",
  "policy",
  "soroban-sdk",
 ]

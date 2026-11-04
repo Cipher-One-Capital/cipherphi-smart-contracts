@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `distribute` under arbitrary payouts, signers and tampering. A payout goes
-//! through only if it is untampered, signed by 2 of 3, on the current sequence,
-//! and covered by its bucket. The buckets never exceed the balance.
+//! `distribute` under arbitrary payouts, approvals and tampering. A payout goes
+//! through only if it is untampered, approved by the approval account, on the
+//! current sequence, and covered by its bucket. The buckets never exceed the
+//! balance. The account's own 2-of-3 threshold is Stellar's, not modelled here.
 
 #![no_main]
 
@@ -15,7 +16,7 @@ use zakat_pool::Attestation;
 struct Payout {
     category: u8,
     amount: i128,
-    signer_mask: u8,
+    approved: bool,
     /// Which binding to break, if any.
     tamper: u8,
     sequence_offset: u8,
@@ -77,13 +78,10 @@ fuzz_target!(|input: Input| {
             _ => false,
         };
 
-        let signed = h.sign(&payload, payout.signer_mask);
-        let signers = (payout.signer_mask & 0b111).count_ones();
-        let result =
-            client.try_distribute(&h.recipient, &h.asset, &payout.amount, &category, &signed);
+        let result = h.try_distribute(category, payout.amount, &payload, payout.approved);
 
         let should_pay = !tampered
-            && signers >= 2
+            && payout.approved
             && payout.sequence_offset == 0
             && payout.amount > 0
             && payout.amount <= bucket;

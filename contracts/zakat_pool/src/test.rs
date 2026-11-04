@@ -14,7 +14,6 @@
 
 extern crate std;
 
-use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, AuthorizedFunction, Events, Ledger, MockAuth, MockAuthInvoke},
@@ -29,9 +28,6 @@ use ::policy::{
     Allocation, DischargeTiming, NisabBasis, Parameters, Policy, PolicyArgs, PolicyClient,
 };
 
-const SEEDS: [[u8; 32]; 3] = [[11u8; 32], [22u8; 32], [33u8; 32]];
-const OUTSIDER: [u8; 32] = [44u8; 32];
-const THRESHOLD: u32 = 2;
 const PLACEHOLDER: [u32; 8] = [3000, 2000, 1000, 500, 500, 1500, 1000, 500];
 const CONTRIBUTION: i128 = 1_000_000;
 const START_LEDGER: u32 = 100;
@@ -60,7 +56,7 @@ struct Fixture {
     recipient: Address,
     governance: Address,
     distributor: Address,
-    signers: std::vec::Vec<SigningKey>,
+    authority: Address,
 }
 
 fn allocation(env: &Env, split: &[u32]) -> Allocation {
@@ -105,11 +101,10 @@ fn setup() -> Fixture {
         .address();
     token::StellarAssetClient::new(&env, &asset).mint(&donor, &(CONTRIBUTION * 10));
 
-    let signers: std::vec::Vec<SigningKey> = SEEDS.iter().map(SigningKey::from_bytes).collect();
-    let mut authority = Vec::new(&env);
-    for signer in &signers {
-        authority.push_back(BytesN::from_array(&env, &signer.verifying_key().to_bytes()));
-    }
+    // The approval account. Its 2-of-3 threshold is Stellar's to enforce and
+    // cannot be modelled here; the deploy script asserts it from the ledger, and
+    // the rehearsal and testnet evidence show a 1-signature payout failing.
+    let authority = Address::generate(&env);
 
     // Policy and pool each need the other's address, so the pool's is settled
     // first, as the deploy script does with a salt.
@@ -120,7 +115,7 @@ fn setup() -> Fixture {
     );
     let attestation = env.register(
         AttestationContract,
-        AttestationArgs::__constructor(&authority, &THRESHOLD),
+        AttestationArgs::__constructor(&authority),
     );
     env.register_at(
         &pool,
@@ -145,7 +140,7 @@ fn setup() -> Fixture {
         recipient,
         governance,
         distributor,
-        signers,
+        authority,
     }
 }
 
@@ -170,25 +165,6 @@ impl Fixture {
             expiry_ledger: EXPIRY_LEDGER,
             pool: self.pool.clone(),
             network_id: self.env.ledger().network_id(),
-        }
-    }
-
-    fn signature(&self, payload: &Attestation, key: &SigningKey, index: u32) -> SignerSig {
-        let message: std::vec::Vec<u8> = payload.clone().to_xdr(&self.env).iter().collect();
-        SignerSig {
-            index,
-            signature: BytesN::from_array(&self.env, &key.sign(&message).to_bytes()),
-        }
-    }
-
-    fn signed(&self, payload: &Attestation, indexes: &[u32]) -> SignedAttestation {
-        let mut signatures = Vec::new(&self.env);
-        for index in indexes {
-            signatures.push_back(self.signature(payload, &self.signers[*index as usize], *index));
-        }
-        SignedAttestation {
-            payload: payload.clone(),
-            signatures,
         }
     }
 
@@ -217,7 +193,7 @@ impl Fixture {
         asset: &Address,
         amount: i128,
         category: Category,
-        attestation: &SignedAttestation,
+        attestation: &Attestation,
         want: Error,
     ) {
         let before = self.state();
@@ -233,7 +209,7 @@ impl Fixture {
     fn refuse_edited(&self, edit: impl FnOnce(&mut Attestation), want: Error) {
         let mut payload = self.payload(Category::Poor, 250_000, 0);
         edit(&mut payload);
-        let signed = self.signed(&payload, &[0, 1]);
+        let signed = payload.clone();
         self.refuse(
             &self.recipient,
             &self.asset,
@@ -594,7 +570,7 @@ fn distribute_pays_out_against_a_valid_quorum() {
     let f = setup();
     f.give();
     let payload = f.payload(Category::Poor, 250_000, 0);
-    let signed = f.signed(&payload, &[0, 1]);
+    let signed = payload.clone();
     let hash = f
         .env
         .crypto()
@@ -623,21 +599,11 @@ fn distribute_pays_out_against_a_valid_quorum() {
 }
 
 #[test]
-fn signatures_beyond_the_threshold_are_accepted() {
-    let f = setup();
-    f.give();
-    let signed = f.signed(&f.payload(Category::Poor, 1, 0), &[0, 1, 2]);
-    f.client()
-        .distribute(&f.recipient, &f.asset, &1, &Category::Poor, &signed);
-    assert_eq!(f.token().balance(&f.recipient), 1);
-}
-
-#[test]
 fn consecutive_distributions_advance_the_sequence() {
     let f = setup();
     f.give();
     for sequence in 0..3u64 {
-        let signed = f.signed(&f.payload(Category::Needy, 10, sequence), &[1, 2]);
+        let signed = f.payload(Category::Needy, 10, sequence);
         f.client()
             .distribute(&f.recipient, &f.asset, &10, &Category::Needy, &signed);
     }
@@ -646,148 +612,202 @@ fn consecutive_distributions_advance_the_sequence() {
 }
 
 #[test]
-fn distribute_requires_the_distributor_to_authorise() {
+fn distribute_requires_the_distributor_and_the_approval_account() {
     let f = setup();
     f.give();
-    let signed = f.signed(&f.payload(Category::Poor, 1, 0), &[0, 1]);
+    let payload = f.payload(Category::Poor, 1, 0);
     f.client()
-        .distribute(&f.recipient, &f.asset, &1, &Category::Poor, &signed);
-    let (who, _) = f.env.auths().first().cloned().unwrap();
-    assert_eq!(who, f.distributor);
-}
+        .distribute(&f.recipient, &f.asset, &1, &Category::Poor, &payload);
 
-#[test]
-fn submission_by_an_authority_key_is_refused() {
-    let f = setup();
-    f.give();
-    let signed = f.signed(&f.payload(Category::Poor, 1, 0), &[0, 1]);
-    let before = f.state();
-    let holder = Address::generate(&f.env);
-    f.env.mock_auths(&[MockAuth {
-        address: &holder,
-        invoke: &MockAuthInvoke {
-            contract: &f.pool,
-            fn_name: "distribute",
-            args: (
+    let auths = f.env.auths();
+    assert_eq!(auths.len(), 2);
+    let (who, invocation) = auths[0].clone();
+    assert_eq!(who, f.distributor);
+    assert_eq!(
+        invocation.function,
+        AuthorizedFunction::Contract((
+            f.pool.clone(),
+            Symbol::new(&f.env, "distribute"),
+            (
                 f.recipient.clone(),
                 f.asset.clone(),
                 1i128,
                 Category::Poor,
-                signed.clone(),
+                payload.clone(),
             )
                 .into_val(&f.env),
-            sub_invokes: &[],
-        },
-    }]);
+        ))
+    );
+    // The approval account authorises the payload alone, so what its signers
+    // sign is exactly the approval, field by field.
+    let (who, invocation) = auths[1].clone();
+    assert_eq!(who, f.authority);
+    assert_eq!(
+        invocation.function,
+        AuthorizedFunction::Contract((
+            f.pool.clone(),
+            Symbol::new(&f.env, "distribute"),
+            (payload,).into_val(&f.env),
+        ))
+    );
+}
+
+/// Authorise `distribute` for exactly the addresses given, each over the
+/// arguments it would sign, then attempt the payout. Nothing may move.
+fn refuse_unauthorised(
+    f: &Fixture,
+    payload: &Attestation,
+    distributor: bool,
+    approval: Option<&Attestation>,
+) {
+    let before = f.state();
+    let full_args = (
+        f.recipient.clone(),
+        f.asset.clone(),
+        payload.amount,
+        payload.category,
+        payload.clone(),
+    )
+        .into_val(&f.env);
+    let approval_args = approval.map(|a| (a.clone(),).into_val(&f.env));
+    let mut mocks = std::vec::Vec::new();
+    let distributor_invoke = MockAuthInvoke {
+        contract: &f.pool,
+        fn_name: "distribute",
+        args: full_args,
+        sub_invokes: &[],
+    };
+    if distributor {
+        mocks.push(MockAuth {
+            address: &f.distributor,
+            invoke: &distributor_invoke,
+        });
+    }
+    let approval_invoke = approval_args.map(|args| MockAuthInvoke {
+        contract: &f.pool,
+        fn_name: "distribute",
+        args,
+        sub_invokes: &[],
+    });
+    if let Some(invoke) = approval_invoke.as_ref() {
+        mocks.push(MockAuth {
+            address: &f.authority,
+            invoke,
+        });
+    }
+    f.env.mock_auths(&mocks);
     assert!(f
         .client()
-        .try_distribute(&f.recipient, &f.asset, &1, &Category::Poor, &signed)
+        .try_distribute(
+            &f.recipient,
+            &f.asset,
+            &payload.amount,
+            &payload.category,
+            payload
+        )
         .is_err());
     f.env.mock_all_auths();
-    assert_eq!(f.state(), before);
+    assert_eq!(f.state(), before, "an unauthorised payout moved the pool");
 }
 
 #[test]
-fn one_signature_fails_with_threshold_not_met() {
+fn both_authorisations_together_pay_out() {
+    // The control for the refusals below: the same mocks with both present.
     let f = setup();
     f.give();
-    let signed = f.signed(&f.payload(Category::Poor, 250_000, 0), &[0]);
+    let payload = f.payload(Category::Poor, 10, 0);
+    let full_args = (
+        f.recipient.clone(),
+        f.asset.clone(),
+        10i128,
+        Category::Poor,
+        payload.clone(),
+    )
+        .into_val(&f.env);
+    f.env.mock_auths(&[
+        MockAuth {
+            address: &f.distributor,
+            invoke: &MockAuthInvoke {
+                contract: &f.pool,
+                fn_name: "distribute",
+                args: full_args,
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &f.authority,
+            invoke: &MockAuthInvoke {
+                contract: &f.pool,
+                fn_name: "distribute",
+                args: (payload.clone(),).into_val(&f.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    f.client()
+        .distribute(&f.recipient, &f.asset, &10, &Category::Poor, &payload);
+    assert_eq!(f.token().balance(&f.recipient), 10);
+}
+
+#[test]
+fn a_payout_without_the_approval_account_fails() {
+    let f = setup();
+    f.give();
+    let payload = f.payload(Category::Poor, 10, 0);
+    refuse_unauthorised(&f, &payload, true, None);
+}
+
+#[test]
+fn the_approval_account_alone_cannot_pay_out() {
+    let f = setup();
+    f.give();
+    let payload = f.payload(Category::Poor, 10, 0);
+    refuse_unauthorised(&f, &payload, false, Some(&payload));
+}
+
+#[test]
+fn an_approval_of_a_different_payload_fails() {
+    // The signers approved one payout; the distributor submits another that
+    // passes every binding the pool checks itself.
+    let f = setup();
+    f.give();
+    let submitted = f.payload(Category::Poor, 10, 0);
+    let mut approved = submitted.clone();
+    approved.expiry_ledger += 1;
+    refuse_unauthorised(&f, &submitted, true, Some(&approved));
+}
+
+#[test]
+fn an_approval_account_that_is_the_distributor_is_refused() {
+    let f = setup();
+    f.give();
+    let same = f.env.register(FixedAuthority, (f.distributor.clone(),));
+    point_at_verifier(&f, &same);
+    let payload = f.payload(Category::Poor, 10, 0);
     f.refuse(
         &f.recipient,
         &f.asset,
-        250_000,
+        10,
         Category::Poor,
-        &signed,
-        Error::ThresholdNotMet,
+        &payload,
+        Error::RolesOverlap,
     );
 }
 
 #[test]
-fn no_signature_fails_with_threshold_not_met() {
+fn an_approval_account_that_is_governance_is_refused() {
     let f = setup();
     f.give();
-    let signed = f.signed(&f.payload(Category::Poor, 250_000, 0), &[]);
+    let same = f.env.register(FixedAuthority, (f.governance.clone(),));
+    point_at_verifier(&f, &same);
+    let payload = f.payload(Category::Poor, 10, 0);
     f.refuse(
         &f.recipient,
         &f.asset,
-        250_000,
+        10,
         Category::Poor,
-        &signed,
-        Error::ThresholdNotMet,
-    );
-}
-
-#[test]
-fn a_duplicate_signer_counts_once() {
-    let f = setup();
-    f.give();
-    let signed = f.signed(&f.payload(Category::Poor, 250_000, 0), &[0, 0]);
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        250_000,
-        Category::Poor,
-        &signed,
-        Error::ThresholdNotMet,
-    );
-}
-
-#[test]
-fn an_unknown_signer_index_is_refused() {
-    let f = setup();
-    f.give();
-    let payload = f.payload(Category::Poor, 250_000, 0);
-    let signed = SignedAttestation {
-        payload: payload.clone(),
-        signatures: vec![&f.env, f.signature(&payload, &f.signers[0], 9)],
-    };
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        250_000,
-        Category::Poor,
-        &signed,
-        Error::UnknownSigner,
-    );
-}
-
-#[test]
-fn a_key_outside_the_authority_is_refused() {
-    let f = setup();
-    f.give();
-    let payload = f.payload(Category::Poor, 250_000, 0);
-    let outsider = SigningKey::from_bytes(&OUTSIDER);
-    let signed = SignedAttestation {
-        payload: payload.clone(),
-        signatures: vec![
-            &f.env,
-            f.signature(&payload, &outsider, 0),
-            f.signature(&payload, &f.signers[1], 1),
-        ],
-    };
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        250_000,
-        Category::Poor,
-        &signed,
-        Error::AttestationRejected,
-    );
-}
-
-#[test]
-fn an_attestation_altered_after_signing_is_refused() {
-    let f = setup();
-    f.give();
-    let mut signed = f.signed(&f.payload(Category::Poor, 250_000, 0), &[0, 1]);
-    signed.payload.expiry_ledger += 1;
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        250_000,
-        Category::Poor,
-        &signed,
-        Error::AttestationRejected,
+        &payload,
+        Error::RolesOverlap,
     );
 }
 
@@ -841,7 +861,7 @@ fn an_attestation_for_another_network_is_refused() {
 fn a_reused_attestation_is_refused() {
     let f = setup();
     f.give();
-    let signed = f.signed(&f.payload(Category::Poor, 10, 0), &[0, 1]);
+    let signed = f.payload(Category::Poor, 10, 0);
     f.client()
         .distribute(&f.recipient, &f.asset, &10, &Category::Poor, &signed);
     f.refuse(
@@ -881,7 +901,7 @@ fn a_payout_of_the_whole_bucket_is_allowed() {
     f.give();
     let index = Category::Wayfarers as u32;
     let whole = f.client().balances(&f.asset).get_unchecked(index);
-    let signed = f.signed(&f.payload(Category::Wayfarers, whole, 0), &[0, 1]);
+    let signed = f.payload(Category::Wayfarers, whole, 0);
     f.client().distribute(
         &f.recipient,
         &f.asset,
@@ -897,7 +917,7 @@ fn a_payout_of_the_whole_bucket_is_allowed() {
 fn an_empty_bucket_is_refused() {
     let f = setup();
     f.give();
-    let signed = f.signed(&f.payload(Category::Wayfarers, 50_001, 0), &[0, 1]);
+    let signed = f.payload(Category::Wayfarers, 50_001, 0);
     f.refuse(
         &f.recipient,
         &f.asset,
@@ -913,7 +933,7 @@ fn zero_and_negative_payouts_are_refused() {
     let f = setup();
     f.give();
     for amount in [0i128, -1] {
-        let signed = f.signed(&f.payload(Category::Poor, amount, 0), &[0, 1]);
+        let signed = f.payload(Category::Poor, amount, 0);
         f.refuse(
             &f.recipient,
             &f.asset,
@@ -931,7 +951,7 @@ fn a_payout_to_the_pool_itself_is_refused() {
     f.give();
     let mut payload = f.payload(Category::Poor, 10, 0);
     payload.recipient = f.pool.clone();
-    let signed = f.signed(&payload, &[0, 1]);
+    let signed = payload.clone();
     f.refuse(
         &f.pool,
         &f.asset,
@@ -949,7 +969,7 @@ fn a_payout_in_an_asset_that_is_not_approved_is_refused() {
     let other = Address::generate(&f.env);
     let mut payload = f.payload(Category::Poor, 10, 0);
     payload.asset = other.clone();
-    let signed = f.signed(&payload, &[0, 1]);
+    let signed = payload.clone();
     f.refuse(
         &f.recipient,
         &other,
@@ -962,24 +982,38 @@ fn a_payout_in_an_asset_that_is_not_approved_is_refused() {
 
 // --- attestation is untrusted -------------------------------------------------
 
-/// Says yes to everything, standing in for a verifier repointed to something
-/// permissive. Every binding the pool checks itself must still hold.
+/// Names whatever account it was built with, standing in for an `attestation`
+/// repointed to an account of an attacker's choosing. Every binding the pool
+/// checks itself must still hold.
 #[contract]
-struct PermissiveVerifier;
+struct FixedAuthority;
 
-#[contractimpl]
-impl PermissiveVerifier {
-    pub fn verify(_env: Env, _payload: Attestation, _signatures: Vec<SignerSig>) {}
+#[contracttype]
+enum FixedKey {
+    Authority,
 }
 
-/// Answers with something that is not a clean yes.
+#[contractimpl]
+impl FixedAuthority {
+    pub fn __constructor(env: Env, authority: Address) {
+        env.storage()
+            .instance()
+            .set(&FixedKey::Authority, &authority);
+    }
+
+    pub fn authority(env: Env) -> Address {
+        env.storage().instance().get(&FixedKey::Authority).unwrap()
+    }
+}
+
+/// Answers with something that is not an address.
 #[contract]
-struct NonsenseVerifier;
+struct NonsenseAuthority;
 
 #[contractimpl]
-impl NonsenseVerifier {
-    pub fn verify(_env: Env, _payload: Attestation, _signatures: Vec<SignerSig>) -> bool {
-        true
+impl NonsenseAuthority {
+    pub fn authority(_env: Env) -> u32 {
+        7
     }
 }
 
@@ -996,9 +1030,9 @@ fn point_at_verifier(f: &Fixture, verifier: &Address) {
 fn a_verifier_answering_nonsense_is_rejected() {
     let f = setup();
     f.give();
-    let verifier = f.env.register(NonsenseVerifier, ());
+    let verifier = f.env.register(NonsenseAuthority, ());
     point_at_verifier(&f, &verifier);
-    let signed = f.signed(&f.payload(Category::Poor, 10, 0), &[0, 1]);
+    let signed = f.payload(Category::Poor, 10, 0);
     f.refuse(
         &f.recipient,
         &f.asset,
@@ -1010,10 +1044,11 @@ fn a_verifier_answering_nonsense_is_rejected() {
 }
 
 #[test]
-fn the_pool_checks_its_bindings_even_under_a_permissive_verifier() {
+fn the_pool_checks_its_bindings_even_under_a_repointed_attestation() {
     let f = setup();
     f.give();
-    let verifier = f.env.register(PermissiveVerifier, ());
+    let attacker = Address::generate(&f.env);
+    let verifier = f.env.register(FixedAuthority, (attacker,));
     point_at_verifier(&f, &verifier);
     let other = Address::generate(&f.env);
     let other_network = BytesN::from_array(&f.env, &[9u8; 32]);
@@ -1094,7 +1129,7 @@ fn pause_blocks_contribute_at_once_and_does_not_block_distribute() {
     );
     assert_eq!(f.state(), before);
 
-    let signed = f.signed(&f.payload(Category::Poor, 10, 0), &[0, 1]);
+    let signed = f.payload(Category::Poor, 10, 0);
     f.client()
         .distribute(&f.recipient, &f.asset, &10, &Category::Poor, &signed);
     assert_eq!(f.token().balance(&f.recipient), 10);
@@ -1121,7 +1156,7 @@ fn disabling_the_distributor_blocks_distribute_at_once() {
         f.env.events().all().filter_by_contract(&f.pool),
         std::vec![DistributorDisabled {}.to_xdr(&f.env, &f.pool)]
     );
-    let signed = f.signed(&f.payload(Category::Poor, 10, 0), &[0, 1]);
+    let signed = f.payload(Category::Poor, 10, 0);
     f.refuse(
         &f.recipient,
         &f.asset,
@@ -1488,7 +1523,7 @@ fn a_new_distributor_takes_the_delay_and_lifts_the_disable() {
 
     let mut payload = f.payload(Category::Poor, 10, 0);
     payload.expiry_ledger = f.env.ledger().sequence() + 100;
-    let signed = f.signed(&payload, &[0, 1]);
+    let signed = payload.clone();
     f.client()
         .distribute(&f.recipient, &f.asset, &10, &Category::Poor, &signed);
     let (who, _) = f.env.auths().first().cloned().unwrap();
@@ -1581,7 +1616,7 @@ fn run_invariant(seed: u64, steps: u32) {
                 let amount = (rng.next() as i128) % (bucket * 2 + 1) + 1;
                 let category: Category = ALL[index as usize];
                 let payload = f.payload(category, amount, sequence);
-                let signed = f.signed(&payload, &[0, 2]);
+                let signed = payload.clone();
                 let result =
                     f.client()
                         .try_distribute(&f.recipient, &f.asset, &amount, &category, &signed);
@@ -1672,7 +1707,7 @@ fn each_assets_solvency_stands_alone() {
     // A signature for the first asset does not spend the second.
     let mut payload = f.payload(Category::Poor, 100, 0);
     payload.expiry_ledger = f.env.ledger().sequence() + 100;
-    let signed = f.signed(&payload, &[0, 1]);
+    let signed = payload.clone();
     assert_eq!(
         f.client()
             .try_distribute(&f.recipient, &second, &100, &Category::Poor, &signed),

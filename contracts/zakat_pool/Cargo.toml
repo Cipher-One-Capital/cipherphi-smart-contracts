@@ -15,6 +15,5 @@ cipherphi_interface = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-ed25519-dalek = { workspace = true }
 policy = { workspace = true }
 attestation = { workspace = true }
