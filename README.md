@@ -61,4 +61,4 @@ Planned but not committed:
 
 ## License
 
-Apache 2.0, see [LICENSE](./LICENSE)
+The smart contracts in [`contracts/`](./contracts) and their reproducible build in [`ops/`](./ops) are licensed under Apache 2.0, see [`contracts/LICENSE`](./contracts/LICENSE). Nothing else in this repository is licensed for reuse.
