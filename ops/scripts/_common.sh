@@ -1,7 +1,5 @@
 # shellcheck shell=bash
 # Sourced by the other scripts. Not executable on its own.
-#
-# Adapted from demo/scripts/_common.sh, which explains the container flags.
 
 set -euo pipefail
 

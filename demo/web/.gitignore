@@ -1,5 +1,0 @@
-*.tsbuildinfo
-next-env.d.ts
-.next/
-.vercel
-test-results/

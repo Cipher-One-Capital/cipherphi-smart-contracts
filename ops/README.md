@@ -7,7 +7,7 @@ bash ops/scripts/build.sh                # writes ops/out/*.wasm and ops/out/has
 node ops/scripts/check-no-upgrade.mjs    # reads the Wasm: zakat_pool has no way to replace its code
 ```
 
-The build follows `demo/scripts`: the same pinned image, set in `build.conf`, with SEP-58 metadata recorded in each Wasm. All three Wasm files record the same `source_sha256`, because one archive holds the whole workspace. The archive is rebuilt from git rather than committed, and it leaves out the fuzz crate.
+The image is pinned by digest in `build.conf`, and each Wasm records SEP-58 metadata. All three Wasm files record the same `source_sha256`, because one archive holds the whole workspace. The archive is rebuilt from git rather than committed, and it leaves out the fuzz crate.
 
 To check a deployed contract, fetch its Wasm from the network and compare its hash with the matching one in `ops/out/hashes.json`:
 
