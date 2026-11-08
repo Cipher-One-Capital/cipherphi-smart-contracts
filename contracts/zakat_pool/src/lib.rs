@@ -15,7 +15,11 @@
 //! received.
 //!
 //! A payout can only be made via the approval multisig's authorisation over its
-//! exact arguments. A short quorum, a changed argument, a replay, another network
+//! exact arguments, and only to a recipient that governance approved. This limits
+//! where a payout can go to keep stolen approval keys from reaching an address
+//! the thief picks.
+//!
+//! A short quorum, a changed argument, a replay, another network
 //! or another pool is refused by Stellar at `require_auth`, before any of the
 //! pool's checks.
 //!
@@ -59,12 +63,16 @@ impl ZakatPool {
     /// The constructor can only run once, atomically with deployment. This removes
     /// any separately callable initialiser to leave no window in which the pool can
     /// be captured.
+    ///
+    /// An empty `recipients` can be accepted, and a recipient can only be accepted
+    /// if it is not the pool, governance, the approval multisig or a duplicate.
     pub fn __constructor(
         env: Env,
         governance: Address,
         authority: Address,
         policy: Address,
         asset: Address,
+        recipients: Vec<Address>,
         timelock_ledgers: u32,
     ) -> Result<(), Error> {
         governance.require_auth();
@@ -94,6 +102,10 @@ impl ZakatPool {
         env.storage()
             .persistent()
             .set(&DataKey::CategoryBalances(asset), &empty_buckets(&env));
+
+        for recipient in recipients.iter() {
+            approve_recipient(&env, &recipient)?;
+        }
         Ok(())
     }
 
@@ -152,7 +164,8 @@ impl ZakatPool {
     }
 
     /// Transfers `amount` of `asset` from a category bucket to `recipient` when the
-    /// approval multisig has authorised exactly that payout.
+    /// approval multisig has authorised exactly that payout and governance has
+    /// approved the recipient.
     ///
     /// The authorisation covers these 4 arguments, this pool, this network, a
     /// single-use nonce and an expiry. The transaction can be submitted by anyone,
@@ -170,7 +183,12 @@ impl ZakatPool {
         // 1. The approval multisig, over exactly these arguments.
         Self::authority(env.clone()).require_auth();
 
-        // 2. The arguments.
+        // 2. The recipient, approved by governance.
+        if !Self::is_approved_recipient(env.clone(), recipient.clone()) {
+            return Err(Error::RecipientNotApproved);
+        }
+
+        // 3. The arguments.
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -182,7 +200,7 @@ impl ZakatPool {
             return Err(Error::SelfDistribution);
         }
 
-        // 3. The bucket holds the amount.
+        // 4. The bucket holds the amount.
         let index = category as u32;
         let mut buckets = Self::balances(env.clone(), asset.clone());
         let balance = buckets.get_unchecked(index);
@@ -190,7 +208,7 @@ impl ZakatPool {
             return Err(Error::InsufficientBucket);
         }
 
-        // 4. Decrement, then transfer.
+        // 5. Decrement, then transfer.
         buckets.set(index, balance.checked_sub(amount).ok_or(Error::Overflow)?);
         env.storage()
             .persistent()
@@ -203,10 +221,10 @@ impl ZakatPool {
             return Err(Error::TransferShortfall);
         }
 
-        // 5. Solvency.
+        // 6. Solvency.
         assert_solvent(&env, &asset, &buckets)?;
 
-        // 6. The event.
+        // 7. The event.
         Disbursement {
             recipient,
             category,
@@ -236,6 +254,21 @@ impl ZakatPool {
         Self::governance(env.clone()).require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
         ContributionsResumed {}.publish(&env);
+    }
+
+    /// Removes `recipient` from the approved recipients at once, when the approval
+    /// multisig authorises it.
+    ///
+    /// An instant removal cannot be made by governance. This keeps it with the
+    /// approval multisig to stop a stolen governance quorum from freezing payouts,
+    /// and to let the signers withdraw an approval they signed before a partner was
+    /// compromised.
+    pub fn remove_recipient(env: Env, caller: Address, recipient: Address) -> Result<(), Error> {
+        if caller != Self::authority(env.clone()) {
+            return Err(Error::Unauthorised);
+        }
+        caller.require_auth();
+        remove_recipient(&env, &recipient, caller)
     }
 
     // --- changes behind the timelock -----------------------------------------
@@ -293,6 +326,9 @@ impl ZakatPool {
                 if address == Self::governance(env.clone()) {
                     return Err(Error::RolesOverlap);
                 }
+                if Self::is_approved_recipient(env.clone(), address.clone()) {
+                    return Err(Error::RecipientIsRole);
+                }
                 storage.set(&DataKey::Authority, &address);
             }
             Change::ApproveAsset(asset) => {
@@ -317,6 +353,10 @@ impl ZakatPool {
                     Ok(Ok(())) => {}
                     _ => return Err(Error::PolicyRefused),
                 }
+            }
+            Change::ApproveRecipient(recipient) => approve_recipient(&env, &recipient)?,
+            Change::RemoveRecipient(recipient) => {
+                remove_recipient(&env, &recipient, Self::governance(env.clone()))?
             }
         }
 
@@ -376,6 +416,12 @@ impl ZakatPool {
             .unwrap()
     }
 
+    pub fn is_approved_recipient(env: Env, recipient: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::ApprovedRecipient(recipient))
+    }
+
     pub fn governance(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Governance).unwrap()
     }
@@ -415,6 +461,46 @@ fn empty_buckets(env: &Env) -> Vec<i128> {
         buckets.push_back(0);
     }
     buckets
+}
+
+/// Approves `recipient` and emits the event, unless it is the pool, governance,
+/// the approval multisig or already approved.
+fn approve_recipient(env: &Env, recipient: &Address) -> Result<(), Error> {
+    if *recipient == env.current_contract_address() {
+        return Err(Error::SelfDistribution);
+    }
+    if *recipient == ZakatPool::governance(env.clone())
+        || *recipient == ZakatPool::authority(env.clone())
+    {
+        return Err(Error::RecipientIsRole);
+    }
+    let key = DataKey::ApprovedRecipient(recipient.clone());
+    let storage = env.storage().persistent();
+    if storage.has(&key) {
+        return Err(Error::RecipientAlreadyApproved);
+    }
+    storage.set(&key, &true);
+    RecipientApproved {
+        recipient: recipient.clone(),
+    }
+    .publish(env);
+    Ok(())
+}
+
+/// Removes `recipient` and emits the event naming `by`, unless it is not approved.
+fn remove_recipient(env: &Env, recipient: &Address, by: Address) -> Result<(), Error> {
+    let key = DataKey::ApprovedRecipient(recipient.clone());
+    let storage = env.storage().persistent();
+    if !storage.has(&key) {
+        return Err(Error::RecipientNotApproved);
+    }
+    storage.remove(&key);
+    RecipientRemoved {
+        recipient: recipient.clone(),
+        by,
+    }
+    .publish(env);
+    Ok(())
 }
 
 /// Rejects `policy` unless it names this pool as its controller.

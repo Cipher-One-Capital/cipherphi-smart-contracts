@@ -30,6 +30,8 @@ pub struct Harness {
     pub asset: Address,
     pub donor: Address,
     pub recipient: Address,
+    /// An address that governance never approved as a recipient.
+    pub stranger: Address,
     pub authority: Address,
 }
 
@@ -42,6 +44,7 @@ impl Harness {
 
         let donor = Address::generate(&env);
         let recipient = Address::generate(&env);
+        let stranger = Address::generate(&env);
         let asset = env
             .register_stellar_asset_contract_v2(Address::generate(&env))
             .address();
@@ -76,6 +79,7 @@ impl Harness {
                 &authority,
                 &policy,
                 &asset,
+                &Vec::from_slice(&env, std::slice::from_ref(&recipient)),
                 &MIN_TIMELOCK_LEDGERS,
             ),
         );
@@ -89,6 +93,7 @@ impl Harness {
             asset,
             donor,
             recipient,
+            stranger,
             authority,
         }
     }
@@ -113,12 +118,13 @@ impl Harness {
         assert!(self.client().balances(&self.asset).iter().all(|b| b >= 0));
     }
 
-    /// Attempts a payout of `amount` from `category` to the recipient, with the approval
+    /// Attempts a payout of `amount` from `category` to `to`, with the approval
     /// account's authorisation of the `approved` arguments when `approved` is set, and with
     /// no authorisation at all otherwise.
     /// The approved arguments can be different from the submitted ones.
     pub fn try_distribute(
         &self,
+        to: &Address,
         category: Category,
         amount: i128,
         approved: Option<(Address, Address, i128, Category)>,
@@ -139,7 +145,7 @@ impl Harness {
         self.env.mock_auths(&mocks);
         let result = self
             .client()
-            .try_distribute(&self.recipient, &self.asset, &amount, &category);
+            .try_distribute(to, &self.asset, &amount, &category);
         self.env.mock_all_auths();
         result
     }

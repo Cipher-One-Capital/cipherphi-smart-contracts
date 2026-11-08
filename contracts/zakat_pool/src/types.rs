@@ -6,7 +6,9 @@ use soroban_sdk::{contracterror, contractevent, contracttype, Address, Vec};
 /// The storage keys that the pool uses.
 ///
 /// Configuration is held in instance storage, which shares the contract's
-/// lifetime, and only the per-asset balances are keyed separately. Nothing can be
+/// lifetime, and only the per-asset balances and the approved recipients are keyed
+/// separately. This keys each recipient apart to keep a payout at one read,
+/// whatever the number of recipients. Nothing can be
 /// held in temporary storage. This avoids temporary storage to stop a queued
 /// change from vanishing mid-timelock.
 #[contracttype]
@@ -22,6 +24,8 @@ pub enum DataKey {
     PendingChange,
     /// The persistent entry that holds the 8 buckets of one approved asset.
     CategoryBalances(Address),
+    /// The persistent entry that marks one recipient as approved by governance.
+    ApprovedRecipient(Address),
 }
 
 /// A governance change that waits out the timelock.
@@ -34,6 +38,10 @@ pub enum Change {
     ApproveAsset(Address),
     SetAllocation(Allocation),
     SetParameters(Parameters),
+    /// An addition to the recipients that a payout can reach.
+    ApproveRecipient(Address),
+    /// A removal from the recipients that a payout can reach.
+    RemoveRecipient(Address),
 }
 
 #[contracttype]
@@ -46,9 +54,9 @@ pub struct PendingChange {
 
 /// The refusals that the pool returns, one variant per refusal.
 ///
-/// A retired number cannot be reused, and the pool's numbers stay below
-/// `policy`'s, which start at 30. This keeps every number stable to let a failed
-/// transaction name its refusal without ambiguity.
+/// A retired number cannot be reused, and the pool's numbers can only be below 30
+/// or from 40, since `policy` holds 30 to 39. This keeps every number stable to let
+/// a failed transaction name its refusal without ambiguity.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -101,6 +109,13 @@ pub enum Error {
     RolesOverlap = 28,
     /// The `policy` contract does not name this pool as its controller.
     PolicyControllerMismatch = 29,
+    // Numbers 30 to 39 cannot be used: they are held by `policy`.
+    /// The recipient is not approved by governance.
+    RecipientNotApproved = 40,
+    /// The recipient is already approved.
+    RecipientAlreadyApproved = 41,
+    /// The recipient is the governance or approval account.
+    RecipientIsRole = 42,
 }
 
 /// The event that `contribute` emits, with the whole split in [`Category`]
@@ -155,6 +170,28 @@ pub struct ChangeCancelled {
     pub change: Change,
     pub execute_after: u32,
     /// The role that cancelled the change: governance or the approval multisig.
+    pub by: Address,
+}
+
+/// The event that an approval of a recipient emits, at construction or when an
+/// `ApproveRecipient` change executes.
+///
+/// This emits it on both paths to let a reader with only the event stream rebuild
+/// the approved set.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientApproved {
+    #[topic]
+    pub recipient: Address,
+}
+
+/// The event that a removal of a recipient emits, by the timelock or at once.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientRemoved {
+    #[topic]
+    pub recipient: Address,
+    /// The role that removed the recipient: governance or the approval multisig.
     pub by: Address,
 }
 
