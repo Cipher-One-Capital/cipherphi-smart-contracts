@@ -1,25 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `distribute` under arbitrary payouts, approvals and tampering. A payout goes
-//! through only if it is untampered, approved by the approval account, on the
-//! current sequence, and covered by its bucket. The buckets never exceed the
-//! balance. The account's own 2-of-3 threshold is Stellar's, not modelled here.
+//! Fuzzes `distribute` with arbitrary payouts, approvals and tampering.
+//! Checks that a payout is made only when the approval account authorised exactly the
+//! submitted arguments and its bucket covers it, and that the buckets never exceed the balance.
+//! The account's own 2-of-3 threshold can only be enforced by Stellar and is not modelled here.
 
 #![no_main]
 
-use cipherphi_fuzz::{Harness, ALL, START_LEDGER};
+use cipherphi_fuzz::{Harness, ALL};
 use libfuzzer_sys::{arbitrary, fuzz_target};
-use soroban_sdk::{testutils::Address as _, token, Address, BytesN};
-use zakat_pool::Attestation;
+use soroban_sdk::{testutils::Address as _, token, Address};
 
 #[derive(arbitrary::Arbitrary, Debug)]
 struct Payout {
     category: u8,
     amount: i128,
     approved: bool,
-    /// Which binding to break, if any.
+    /// The argument that the signers approved differently, if any.
     tamper: u8,
-    sequence_offset: u8,
 }
 
 #[derive(arbitrary::Arbitrary, Debug)]
@@ -40,61 +38,42 @@ fuzz_target!(|input: Input| {
 
     for payout in input.payouts.iter().take(8) {
         let category = ALL[(payout.category % 8) as usize];
-        let sequence = client.distribution_seq();
         let bucket = client.balances(&h.asset).get_unchecked(category as u32);
         let paid_before = token::Client::new(&h.env, &h.asset).balance(&h.recipient);
 
-        let mut payload = Attestation {
-            recipient: h.recipient.clone(),
-            asset: h.asset.clone(),
-            category,
-            amount: payout.amount,
-            sequence: sequence + payout.sequence_offset as u64,
-            expiry_ledger: START_LEDGER + 1_000,
-            pool: h.pool.clone(),
-            network_id: h.env.ledger().network_id(),
-        };
+        let (mut recipient, mut asset, mut amount, mut signed_category) =
+            (h.recipient.clone(), h.asset.clone(), payout.amount, category);
         let tampered = match payout.tamper % 8 {
             1 => {
-                payload.recipient = Address::generate(&h.env);
+                recipient = Address::generate(&h.env);
                 true
             }
             2 => {
-                payload.asset = Address::generate(&h.env);
+                asset = Address::generate(&h.env);
                 true
             }
             3 => {
-                payload.pool = Address::generate(&h.env);
+                amount = payout.amount.wrapping_add(1);
                 true
             }
             4 => {
-                payload.network_id = BytesN::from_array(&h.env, &[9u8; 32]);
-                true
-            }
-            5 => {
-                payload.expiry_ledger = START_LEDGER;
+                signed_category = ALL[((payout.category % 8 + 1) % 8) as usize];
                 true
             }
             _ => false,
         };
+        let approval = payout
+            .approved
+            .then(|| (recipient, asset, amount, signed_category));
 
-        let result = h.try_distribute(category, payout.amount, &payload, payout.approved);
+        let result = h.try_distribute(category, payout.amount, approval);
 
-        let should_pay = !tampered
-            && payout.approved
-            && payout.sequence_offset == 0
-            && payout.amount > 0
-            && payout.amount <= bucket;
+        let should_pay =
+            !tampered && payout.approved && payout.amount > 0 && payout.amount <= bucket;
         assert_eq!(result.is_ok(), should_pay, "{payout:?}");
 
         let paid = token::Client::new(&h.env, &h.asset).balance(&h.recipient) - paid_before;
-        if should_pay {
-            assert_eq!(paid, payout.amount);
-            assert_eq!(client.distribution_seq(), sequence + 1);
-        } else {
-            assert_eq!(paid, 0);
-            assert_eq!(client.distribution_seq(), sequence);
-        }
+        assert_eq!(paid, if should_pay { payout.amount } else { 0 });
         h.assert_invariant();
     }
 });

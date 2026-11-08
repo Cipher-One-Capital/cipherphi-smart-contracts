@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Check that zakat_pool cannot replace its own code, by reading the Wasm rather
-// than the source. A contract can only do that through the host function
-// update_current_contract_wasm, which a Wasm reaches by importing it: module
-// "l", name "6" in soroban-env 27 (env.json). No import, no upgrade path.
+// Checks that zakat_pool cannot replace its own code by reading the Wasm rather than the source.
+// A contract's code can only be replaced via the host function update_current_contract_wasm,
+// which a Wasm reaches by importing it as module "l", name "6" in soroban-env 27 (env.json).
+// An upgrade path cannot exist without that import.
 //
 //   node ops/scripts/check-no-upgrade.mjs [path to zakat_pool.wasm]
 

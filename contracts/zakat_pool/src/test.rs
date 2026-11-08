@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The happy paths, the authorisation assertions, and the refusal matrix,
-//! ported from the demo and extended for assets, governance and the two
-//! untrusted callees.
+//! The tests that cover the happy paths, the authorisation assertions and the
+//! refusal matrix, ported from the demo and extended for assets, governance and
+//! the untrusted policy.
 //!
-//! `policy` and `attestation` are the real contracts unless a test is about a
-//! callee misbehaving, in which case a mock answers at the pinned address.
-//! `env.events().all()` and `env.auths()` show the most recent invocation only,
-//! so each such assertion sits directly after the call it is about. Every
-//! refusal asserts the exact error and that the pool did not move.
+//! `policy` can only be replaced by a mock at the pinned address when a test is
+//! about it misbehaving. The 2-of-3 threshold of the approval multisig can only
+//! be enforced by Stellar. The approval multisig can only be modelled here as
+//! whether it authorised a payout, and over which arguments.
+//! `env.events().all()` and `env.auths()` can only be read for the most recent
+//! invocation. This places each such assertion directly after its call to read
+//! the invocation it is about. Every refusal must be checked against the exact
+//! error and an unmoved pool.
 
 #![cfg(test)]
 
@@ -17,13 +20,10 @@ extern crate std;
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, AuthorizedFunction, Events, Ledger, MockAuth, MockAuthInvoke},
-    token, vec,
-    xdr::ToXdr,
-    Address, Bytes, BytesN, Env, Event, IntoVal, Symbol, Vec,
+    token, vec, Address, Env, Event, IntoVal, Symbol, Vec,
 };
 
 use crate::*;
-use ::attestation::{Attestation as AttestationContract, AttestationArgs};
 use ::policy::{
     Allocation, DischargeTiming, NisabBasis, Parameters, Policy, PolicyArgs, PolicyClient,
 };
@@ -31,14 +31,11 @@ use ::policy::{
 const PLACEHOLDER: [u32; 8] = [3000, 2000, 1000, 500, 500, 1500, 1000, 500];
 const CONTRIBUTION: i128 = 1_000_000;
 const START_LEDGER: u32 = 100;
-const EXPIRY_LEDGER: u32 = 1_000;
 const TIMELOCK: u32 = MIN_TIMELOCK_LEDGERS;
-const PASSPHRASE: &str = "Test SDF Network ; September 2015";
 
-/// Everything a refusal has to leave exactly as it found it.
+/// The state that a refusal has to leave exactly as it found it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
-    sequence: u64,
     buckets: Vec<i128>,
     recipient_balance: i128,
     donor_balance: i128,
@@ -50,12 +47,10 @@ struct Fixture {
     env: Env,
     pool: Address,
     policy: Address,
-    attestation: Address,
     asset: Address,
     donor: Address,
     recipient: Address,
     governance: Address,
-    distributor: Address,
     authority: Address,
 }
 
@@ -75,16 +70,19 @@ fn parameters() -> Parameters {
     }
 }
 
+/// Deploys the pool and resumes contributions, as when the deployment preconditions pass.
 fn setup() -> Fixture {
+    let f = setup_paused();
+    f.client().resume_contributions();
+    f
+}
+
+/// Deploys the pool and leaves contributions closed.
+fn setup_paused() -> Fixture {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_sequence_number(START_LEDGER);
-    let network_id = env
-        .crypto()
-        .sha256(&Bytes::from_slice(&env, PASSPHRASE.as_bytes()))
-        .to_bytes();
-    env.ledger().set_network_id(network_id.to_array());
-    // The timelock tests run far past the default TTLs.
+    // This raises the TTL limits to let the timelock tests run far past the defaults.
     env.ledger().with_mut(|l| {
         l.min_persistent_entry_ttl = 2_000_000;
         l.min_temp_entry_ttl = 2_000_000;
@@ -92,7 +90,6 @@ fn setup() -> Fixture {
     });
 
     let governance = Address::generate(&env);
-    let distributor = Address::generate(&env);
     let donor = Address::generate(&env);
     let recipient = Address::generate(&env);
 
@@ -101,45 +98,34 @@ fn setup() -> Fixture {
         .address();
     token::StellarAssetClient::new(&env, &asset).mint(&donor, &(CONTRIBUTION * 10));
 
-    // The approval account. Its 2-of-3 threshold is Stellar's to enforce and
-    // cannot be modelled here; the deploy script asserts it from the ledger, and
-    // the rehearsal and testnet evidence show a 1-signature payout failing.
+    // An address that stands in for the approval multisig. Its 2-of-3 threshold
+    // cannot be modelled here and can only be enforced by Stellar. It can only be
+    // checked via the deploy script, which asserts it from the ledger, and via the
+    // rehearsal and testnet evidence of a 1-signature payout failing.
     let authority = Address::generate(&env);
 
-    // Policy and pool each need the other's address, so the pool's is settled
-    // first, as the deploy script does with a salt.
+    // The pool address must be settled first, as the deploy script does with a
+    // salt. This fixes it before registration to give policy and pool each
+    // other's address.
     let pool = Address::generate(&env);
     let policy = env.register(
         Policy,
         PolicyArgs::__constructor(&pool, &allocation(&env, &PLACEHOLDER), &parameters()),
     );
-    let attestation = env.register(
-        AttestationContract,
-        AttestationArgs::__constructor(&authority),
-    );
     env.register_at(
         &pool,
         ZakatPool,
-        ZakatPoolArgs::__constructor(
-            &governance,
-            &distributor,
-            &policy,
-            &attestation,
-            &asset,
-            &TIMELOCK,
-        ),
+        ZakatPoolArgs::__constructor(&governance, &authority, &policy, &asset, &TIMELOCK),
     );
 
     Fixture {
         env,
         pool,
         policy,
-        attestation,
         asset,
         donor,
         recipient,
         governance,
-        distributor,
         authority,
     }
 }
@@ -153,25 +139,9 @@ impl Fixture {
         token::Client::new(&self.env, &self.asset)
     }
 
-    /// Valid for this deployment right now. Tests overwrite the one field under
-    /// test before signing, so what fails is exactly what the name says.
-    fn payload(&self, category: Category, amount: i128, sequence: u64) -> Attestation {
-        Attestation {
-            recipient: self.recipient.clone(),
-            asset: self.asset.clone(),
-            category,
-            amount,
-            sequence,
-            expiry_ledger: EXPIRY_LEDGER,
-            pool: self.pool.clone(),
-            network_id: self.env.ledger().network_id(),
-        }
-    }
-
     fn state(&self) -> State {
         let pool = self.client();
         State {
-            sequence: pool.distribution_seq(),
             buckets: pool.balances(&self.asset),
             recipient_balance: self.token().balance(&self.recipient),
             donor_balance: self.token().balance(&self.donor),
@@ -185,39 +155,72 @@ impl Fixture {
             .contribute(&self.donor, &self.asset, &CONTRIBUTION);
     }
 
-    /// Attempt a payout the way a refusal test wants: assert the error, then
-    /// assert nothing moved.
+    fn pay(&self, category: Category, amount: i128) {
+        self.client()
+            .distribute(&self.recipient, &self.asset, &amount, &category);
+    }
+
+    /// Attempts a payout and asserts the error and an unmoved pool when a refusal
+    /// test expects `want`.
     fn refuse(
         &self,
         recipient: &Address,
         asset: &Address,
         amount: i128,
         category: Category,
-        attestation: &Attestation,
         want: Error,
     ) {
         let before = self.state();
         assert_eq!(
             self.client()
-                .try_distribute(recipient, asset, &amount, &category, attestation),
+                .try_distribute(recipient, asset, &amount, &category),
             Err(Ok(want))
         );
         assert_eq!(self.state(), before, "a refused payout moved the pool");
     }
 
-    /// A payout whose only defect is the field a test changes in `edit`.
-    fn refuse_edited(&self, edit: impl FnOnce(&mut Attestation), want: Error) {
-        let mut payload = self.payload(Category::Poor, 250_000, 0);
-        edit(&mut payload);
-        let signed = payload.clone();
-        self.refuse(
-            &self.recipient,
-            &self.asset,
-            250_000,
+    /// Submits one payout when `signer` authorised `approved`, which may be a
+    /// different payout, and returns whether it went through. The pool cannot be
+    /// moved by a refusal.
+    fn submit_with_approval(
+        &self,
+        signer: &Address,
+        submitted: (Address, Address, i128, Category),
+        approved: (Address, Address, i128, Category),
+    ) -> bool {
+        let before = self.state();
+        self.env.mock_auths(&[MockAuth {
+            address: signer,
+            invoke: &MockAuthInvoke {
+                contract: &self.pool,
+                fn_name: "distribute",
+                args: approved.into_val(&self.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let (recipient, asset, amount, category) = submitted;
+        let ok = self
+            .client()
+            .try_distribute(&recipient, &asset, &amount, &category)
+            .is_ok();
+        self.env.mock_all_auths();
+        if !ok {
+            assert_eq!(
+                self.state(),
+                before,
+                "an unauthorised payout moved the pool"
+            );
+        }
+        ok
+    }
+
+    fn payout(&self, amount: i128) -> (Address, Address, i128, Category) {
+        (
+            self.recipient.clone(),
+            self.asset.clone(),
+            amount,
             Category::Poor,
-            &signed,
-            want,
-        );
+        )
     }
 
     fn past_timelock(&self, execute_after: u32) {
@@ -229,17 +232,14 @@ impl Fixture {
 
 #[test]
 fn constructor_stores_the_configuration() {
-    let f = setup();
+    let f = setup_paused();
     let pool = f.client();
     assert_eq!(pool.governance(), f.governance);
-    assert_eq!(pool.distributor(), f.distributor);
+    assert_eq!(pool.authority(), f.authority);
     assert_eq!(pool.policy(), f.policy);
-    assert_eq!(pool.attestation(), f.attestation);
     assert_eq!(pool.approved_assets(), vec![&f.env, f.asset.clone()]);
-    assert_eq!(pool.distribution_seq(), 0);
     assert_eq!(pool.timelock_ledgers(), TIMELOCK);
-    assert!(!pool.is_paused());
-    assert!(!pool.is_distributor_disabled());
+    assert!(pool.is_paused());
     assert_eq!(pool.pending_change(), None);
     assert_eq!(
         pool.balances(&f.asset),
@@ -247,8 +247,8 @@ fn constructor_stores_the_configuration() {
     );
 }
 
-/// `register` panics on a constructor error, so the refusal is read from the
-/// panic message rather than from a typed result.
+/// Returns the panic message when `register` panics on a constructor error.
+/// This reads the refusal from the panic message to work without a typed result.
 fn refusal_of(register: impl FnOnce()) -> std::string::String {
     let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(register))
         .expect_err("the constructor accepted arguments it should have refused");
@@ -271,26 +271,15 @@ fn assert_refused(message: &str, code: u32) {
 fn refuse_construction(
     env: &Env,
     governance: &Address,
-    distributor: &Address,
+    authority: &Address,
     timelock: u32,
     want: Error,
 ) {
-    let (policy, attestation, asset) = (
-        Address::generate(env),
-        Address::generate(env),
-        Address::generate(env),
-    );
+    let (policy, asset) = (Address::generate(env), Address::generate(env));
     let message = refusal_of(|| {
         env.register(
             ZakatPool,
-            ZakatPoolArgs::__constructor(
-                governance,
-                distributor,
-                &policy,
-                &attestation,
-                &asset,
-                &timelock,
-            ),
+            ZakatPoolArgs::__constructor(governance, authority, &policy, &asset, &timelock),
         );
     });
     assert_refused(&message, want as u32);
@@ -300,18 +289,18 @@ fn refuse_construction(
 fn a_timelock_under_seven_days_is_refused_at_construction() {
     let env = Env::default();
     env.mock_all_auths();
-    let (g, d) = (Address::generate(&env), Address::generate(&env));
+    let (g, a) = (Address::generate(&env), Address::generate(&env));
     refuse_construction(
         &env,
         &g,
-        &d,
+        &a,
         MIN_TIMELOCK_LEDGERS - 1,
         Error::TimelockTooShort,
     );
 }
 
 #[test]
-fn governance_cannot_also_be_the_distributor() {
+fn governance_cannot_also_be_the_approval_multisig() {
     let env = Env::default();
     env.mock_all_auths();
     let g = Address::generate(&env);
@@ -319,10 +308,42 @@ fn governance_cannot_also_be_the_distributor() {
 }
 
 #[test]
+fn the_pool_is_deployed_closed_to_contributions() {
+    let f = setup_paused();
+    assert_eq!(
+        f.client().try_contribute(&f.donor, &f.asset, &CONTRIBUTION),
+        Err(Ok(Error::ContributionsPaused))
+    );
+    f.client().resume_contributions();
+    f.give();
+}
+
+#[test]
+fn a_policy_answering_to_someone_else_is_refused_at_construction() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (governance, authority) = (Address::generate(&env), Address::generate(&env));
+    let elsewhere = Address::generate(&env);
+    let policy = env.register(
+        Policy,
+        PolicyArgs::__constructor(&elsewhere, &allocation(&env, &PLACEHOLDER), &parameters()),
+    );
+    let asset = Address::generate(&env);
+    let message = refusal_of(|| {
+        env.register(
+            ZakatPool,
+            ZakatPoolArgs::__constructor(&governance, &authority, &policy, &asset, &TIMELOCK),
+        );
+    });
+    assert_refused(&message, Error::PolicyControllerMismatch as u32);
+}
+
+#[test]
 fn the_constructor_requires_governance_to_authorise() {
-    let f = setup();
-    // Read before anything else, a view included: `setup()`'s registration of
-    // the pool is the most recent invocation.
+    let f = setup_paused();
+    // The auths must be read before any other call, a view included. This reads
+    // them first to catch `setup()`'s registration of the pool as the most recent
+    // invocation.
     let (who, invocation) = f.env.auths().first().cloned().unwrap();
     assert_eq!(who, f.governance);
     assert_eq!(
@@ -332,9 +353,8 @@ fn the_constructor_requires_governance_to_authorise() {
             Symbol::new(&f.env, "__constructor"),
             (
                 f.governance.clone(),
-                f.distributor.clone(),
+                f.authority.clone(),
                 f.policy.clone(),
-                f.attestation.clone(),
                 f.asset.clone(),
                 TIMELOCK,
             )
@@ -473,7 +493,7 @@ impl MockPolicy {
     }
 }
 
-/// Answers `allocate` with a bare number instead of a vector.
+/// A mock policy that answers `allocate` with a bare number instead of a vector.
 #[contract]
 struct WrongTypePolicy;
 
@@ -484,8 +504,8 @@ impl WrongTypePolicy {
     }
 }
 
-/// Repoint the pool directly, standing in for an executed change, so these
-/// tests are about the shape check and not the timelock.
+/// Repoints the pool directly, standing in for an executed change. This skips
+/// the timelock to keep these tests about the shape check.
 fn point_at_policy(f: &Fixture, policy: &Address) {
     f.env.as_contract(&f.pool, || {
         f.env.storage().instance().set(&DataKey::PolicyAddr, policy);
@@ -518,7 +538,7 @@ fn an_allocation_of_nine_elements_is_rejected() {
 
 #[test]
 fn an_allocation_with_a_negative_element_is_rejected() {
-    // Sums correctly to 100: the case a sum-only check would admit.
+    // This sums correctly to 100 to show the case a sum-only check would admit.
     refuse_policy_answer(&[150, -50, 0, 0, 0, 0, 0, 0]);
 }
 
@@ -566,333 +586,103 @@ fn a_well_formed_mock_allocation_is_accepted() {
 // --- distribute ---------------------------------------------------------------
 
 #[test]
-fn distribute_pays_out_against_a_valid_quorum() {
+fn distribute_pays_out_and_emits_the_event() {
     let f = setup();
     f.give();
-    let payload = f.payload(Category::Poor, 250_000, 0);
-    let signed = payload.clone();
-    let hash = f
-        .env
-        .crypto()
-        .sha256(&payload.clone().to_xdr(&f.env))
-        .to_bytes();
-    let expected = Disbursement {
-        recipient: f.recipient.clone(),
-        category: Category::Poor,
-        asset: f.asset.clone(),
-        amount: 250_000,
-        sequence: 0,
-        attestation_hash: hash,
-    }
-    .to_xdr(&f.env, &f.pool);
-
-    f.client()
-        .distribute(&f.recipient, &f.asset, &250_000, &Category::Poor, &signed);
-
+    f.pay(Category::Poor, 250_000);
     assert_eq!(
         f.env.events().all().filter_by_contract(&f.pool),
-        std::vec![expected]
+        std::vec![Disbursement {
+            recipient: f.recipient.clone(),
+            category: Category::Poor,
+            asset: f.asset.clone(),
+            amount: 250_000,
+        }
+        .to_xdr(&f.env, &f.pool)]
     );
     assert_eq!(f.token().balance(&f.recipient), 250_000);
     assert_eq!(f.client().balances(&f.asset).get_unchecked(0), 50_000);
-    assert_eq!(f.client().distribution_seq(), 1);
 }
 
 #[test]
-fn consecutive_distributions_advance_the_sequence() {
+fn payouts_are_independent_of_each_other() {
+    // Payouts cannot be sequenced. Approvals can be run in any order, each on its own.
     let f = setup();
     f.give();
-    for sequence in 0..3u64 {
-        let signed = f.payload(Category::Needy, 10, sequence);
-        f.client()
-            .distribute(&f.recipient, &f.asset, &10, &Category::Needy, &signed);
+    for _ in 0..3 {
+        f.pay(Category::Needy, 10);
     }
-    assert_eq!(f.client().distribution_seq(), 3);
     assert_eq!(f.token().balance(&f.recipient), 30);
 }
 
 #[test]
-fn distribute_requires_the_distributor_and_the_approval_account() {
+fn distribute_requires_the_approval_multisig_over_its_exact_arguments() {
     let f = setup();
     f.give();
-    let payload = f.payload(Category::Poor, 1, 0);
-    f.client()
-        .distribute(&f.recipient, &f.asset, &1, &Category::Poor, &payload);
-
+    f.pay(Category::Poor, 1);
+    // Only one authorisation can be recorded, and it must cover every argument.
+    // This binds every argument to make what the signers sign exactly the payout.
     let auths = f.env.auths();
-    assert_eq!(auths.len(), 2);
+    assert_eq!(auths.len(), 1);
     let (who, invocation) = auths[0].clone();
-    assert_eq!(who, f.distributor);
-    assert_eq!(
-        invocation.function,
-        AuthorizedFunction::Contract((
-            f.pool.clone(),
-            Symbol::new(&f.env, "distribute"),
-            (
-                f.recipient.clone(),
-                f.asset.clone(),
-                1i128,
-                Category::Poor,
-                payload.clone(),
-            )
-                .into_val(&f.env),
-        ))
-    );
-    // The approval account authorises the payload alone, so what its signers
-    // sign is exactly the approval, field by field.
-    let (who, invocation) = auths[1].clone();
     assert_eq!(who, f.authority);
     assert_eq!(
         invocation.function,
         AuthorizedFunction::Contract((
             f.pool.clone(),
             Symbol::new(&f.env, "distribute"),
-            (payload,).into_val(&f.env),
+            (f.recipient.clone(), f.asset.clone(), 1i128, Category::Poor).into_val(&f.env),
         ))
     );
 }
 
-/// Authorise `distribute` for exactly the addresses given, each over the
-/// arguments it would sign, then attempt the payout. Nothing may move.
-fn refuse_unauthorised(
-    f: &Fixture,
-    payload: &Attestation,
-    distributor: bool,
-    approval: Option<&Attestation>,
-) {
-    let before = f.state();
-    let full_args = (
-        f.recipient.clone(),
-        f.asset.clone(),
-        payload.amount,
-        payload.category,
-        payload.clone(),
-    )
-        .into_val(&f.env);
-    let approval_args = approval.map(|a| (a.clone(),).into_val(&f.env));
-    let mut mocks = std::vec::Vec::new();
-    let distributor_invoke = MockAuthInvoke {
-        contract: &f.pool,
-        fn_name: "distribute",
-        args: full_args,
-        sub_invokes: &[],
-    };
-    if distributor {
-        mocks.push(MockAuth {
-            address: &f.distributor,
-            invoke: &distributor_invoke,
-        });
-    }
-    let approval_invoke = approval_args.map(|args| MockAuthInvoke {
-        contract: &f.pool,
-        fn_name: "distribute",
-        args,
-        sub_invokes: &[],
-    });
-    if let Some(invoke) = approval_invoke.as_ref() {
-        mocks.push(MockAuth {
-            address: &f.authority,
-            invoke,
-        });
-    }
-    f.env.mock_auths(&mocks);
-    assert!(f
-        .client()
-        .try_distribute(
-            &f.recipient,
-            &f.asset,
-            &payload.amount,
-            &payload.category,
-            payload
-        )
-        .is_err());
-    f.env.mock_all_auths();
-    assert_eq!(f.state(), before, "an unauthorised payout moved the pool");
-}
-
 #[test]
-fn both_authorisations_together_pay_out() {
-    // The control for the refusals below: the same mocks with both present.
+fn the_approved_payout_goes_through() {
+    // A control for the refusals below that uses the same mocks, matching exactly.
     let f = setup();
     f.give();
-    let payload = f.payload(Category::Poor, 10, 0);
-    let full_args = (
-        f.recipient.clone(),
-        f.asset.clone(),
-        10i128,
-        Category::Poor,
-        payload.clone(),
-    )
-        .into_val(&f.env);
-    f.env.mock_auths(&[
-        MockAuth {
-            address: &f.distributor,
-            invoke: &MockAuthInvoke {
-                contract: &f.pool,
-                fn_name: "distribute",
-                args: full_args,
-                sub_invokes: &[],
-            },
-        },
-        MockAuth {
-            address: &f.authority,
-            invoke: &MockAuthInvoke {
-                contract: &f.pool,
-                fn_name: "distribute",
-                args: (payload.clone(),).into_val(&f.env),
-                sub_invokes: &[],
-            },
-        },
-    ]);
-    f.client()
-        .distribute(&f.recipient, &f.asset, &10, &Category::Poor, &payload);
+    assert!(f.submit_with_approval(&f.authority, f.payout(10), f.payout(10)));
     assert_eq!(f.token().balance(&f.recipient), 10);
 }
 
 #[test]
-fn a_payout_without_the_approval_account_fails() {
+fn a_payout_nobody_approved_fails() {
     let f = setup();
     f.give();
-    let payload = f.payload(Category::Poor, 10, 0);
-    refuse_unauthorised(&f, &payload, true, None);
+    let before = f.state();
+    f.env.mock_auths(&[]);
+    assert!(f
+        .client()
+        .try_distribute(&f.recipient, &f.asset, &10, &Category::Poor)
+        .is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.state(), before);
 }
 
 #[test]
-fn the_approval_account_alone_cannot_pay_out() {
+fn an_approval_by_anyone_else_fails() {
     let f = setup();
     f.give();
-    let payload = f.payload(Category::Poor, 10, 0);
-    refuse_unauthorised(&f, &payload, false, Some(&payload));
+    let stranger = Address::generate(&f.env);
+    assert!(!f.submit_with_approval(&stranger, f.payout(10), f.payout(10)));
+    // A payout cannot be approved by governance either.
+    assert!(!f.submit_with_approval(&f.governance, f.payout(10), f.payout(10)));
 }
 
 #[test]
-fn an_approval_of_a_different_payload_fails() {
-    // The signers approved one payout; the distributor submits another that
-    // passes every binding the pool checks itself.
-    let f = setup();
-    f.give();
-    let submitted = f.payload(Category::Poor, 10, 0);
-    let mut approved = submitted.clone();
-    approved.expiry_ledger += 1;
-    refuse_unauthorised(&f, &submitted, true, Some(&approved));
-}
-
-#[test]
-fn an_approval_account_that_is_the_distributor_is_refused() {
-    let f = setup();
-    f.give();
-    let same = f.env.register(FixedAuthority, (f.distributor.clone(),));
-    point_at_verifier(&f, &same);
-    let payload = f.payload(Category::Poor, 10, 0);
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        10,
-        Category::Poor,
-        &payload,
-        Error::RolesOverlap,
-    );
-}
-
-#[test]
-fn an_approval_account_that_is_governance_is_refused() {
-    let f = setup();
-    f.give();
-    let same = f.env.register(FixedAuthority, (f.governance.clone(),));
-    point_at_verifier(&f, &same);
-    let payload = f.payload(Category::Poor, 10, 0);
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        10,
-        Category::Poor,
-        &payload,
-        Error::RolesOverlap,
-    );
-}
-
-#[test]
-fn an_altered_amount_is_refused() {
-    let f = setup();
-    f.give();
-    f.refuse_edited(|p| p.amount = 1, Error::AttestationMismatch);
-}
-
-#[test]
-fn an_altered_recipient_is_refused() {
+fn a_payout_that_differs_from_the_approval_in_any_argument_fails() {
     let f = setup();
     f.give();
     let other = Address::generate(&f.env);
-    f.refuse_edited(|p| p.recipient = other, Error::AttestationMismatch);
-}
-
-#[test]
-fn an_altered_category_is_refused() {
-    let f = setup();
-    f.give();
-    f.refuse_edited(|p| p.category = Category::Needy, Error::AttestationMismatch);
-}
-
-#[test]
-fn an_attestation_for_another_asset_is_refused() {
-    let f = setup();
-    f.give();
-    let other = Address::generate(&f.env);
-    f.refuse_edited(|p| p.asset = other, Error::WrongAsset);
-}
-
-#[test]
-fn an_attestation_for_another_pool_is_refused() {
-    let f = setup();
-    f.give();
-    let other = Address::generate(&f.env);
-    f.refuse_edited(|p| p.pool = other, Error::WrongPool);
-}
-
-#[test]
-fn an_attestation_for_another_network_is_refused() {
-    let f = setup();
-    f.give();
-    let other = BytesN::from_array(&f.env, &[9u8; 32]);
-    f.refuse_edited(|p| p.network_id = other, Error::WrongNetwork);
-}
-
-#[test]
-fn a_reused_attestation_is_refused() {
-    let f = setup();
-    f.give();
-    let signed = f.payload(Category::Poor, 10, 0);
-    f.client()
-        .distribute(&f.recipient, &f.asset, &10, &Category::Poor, &signed);
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        10,
-        Category::Poor,
-        &signed,
-        Error::SequenceMismatch,
-    );
-}
-
-#[test]
-fn a_future_sequence_is_refused() {
-    let f = setup();
-    f.give();
-    f.refuse_edited(|p| p.sequence = 1, Error::SequenceMismatch);
-}
-
-#[test]
-fn an_expired_attestation_is_refused() {
-    let f = setup();
-    f.give();
-    f.refuse_edited(|p| p.expiry_ledger = START_LEDGER - 1, Error::Expired);
-}
-
-#[test]
-fn expiry_at_the_current_ledger_is_refused() {
-    let f = setup();
-    f.give();
-    f.refuse_edited(|p| p.expiry_ledger = START_LEDGER, Error::Expired);
+    let approved = f.payout(10);
+    let mut altered = std::vec::Vec::new();
+    altered.push((other.clone(), f.asset.clone(), 10, Category::Poor));
+    altered.push((f.recipient.clone(), other, 10, Category::Poor));
+    altered.push((f.recipient.clone(), f.asset.clone(), 11, Category::Poor));
+    altered.push((f.recipient.clone(), f.asset.clone(), 10, Category::Needy));
+    for submitted in altered {
+        assert!(!f.submit_with_approval(&f.authority, submitted, approved.clone()));
+    }
 }
 
 #[test]
@@ -901,14 +691,7 @@ fn a_payout_of_the_whole_bucket_is_allowed() {
     f.give();
     let index = Category::Wayfarers as u32;
     let whole = f.client().balances(&f.asset).get_unchecked(index);
-    let signed = f.payload(Category::Wayfarers, whole, 0);
-    f.client().distribute(
-        &f.recipient,
-        &f.asset,
-        &whole,
-        &Category::Wayfarers,
-        &signed,
-    );
+    f.pay(Category::Wayfarers, whole);
     assert_eq!(f.client().balances(&f.asset).get_unchecked(index), 0);
     assert_eq!(f.token().balance(&f.recipient), whole);
 }
@@ -917,13 +700,11 @@ fn a_payout_of_the_whole_bucket_is_allowed() {
 fn an_empty_bucket_is_refused() {
     let f = setup();
     f.give();
-    let signed = f.payload(Category::Wayfarers, 50_001, 0);
     f.refuse(
         &f.recipient,
         &f.asset,
         50_001,
         Category::Wayfarers,
-        &signed,
         Error::InsufficientBucket,
     );
 }
@@ -933,13 +714,11 @@ fn zero_and_negative_payouts_are_refused() {
     let f = setup();
     f.give();
     for amount in [0i128, -1] {
-        let signed = f.payload(Category::Poor, amount, 0);
         f.refuse(
             &f.recipient,
             &f.asset,
             amount,
             Category::Poor,
-            &signed,
             Error::InvalidAmount,
         );
     }
@@ -949,15 +728,11 @@ fn zero_and_negative_payouts_are_refused() {
 fn a_payout_to_the_pool_itself_is_refused() {
     let f = setup();
     f.give();
-    let mut payload = f.payload(Category::Poor, 10, 0);
-    payload.recipient = f.pool.clone();
-    let signed = payload.clone();
     f.refuse(
         &f.pool,
         &f.asset,
         10,
         Category::Poor,
-        &signed,
         Error::SelfDistribution,
     );
 }
@@ -967,96 +742,13 @@ fn a_payout_in_an_asset_that_is_not_approved_is_refused() {
     let f = setup();
     f.give();
     let other = Address::generate(&f.env);
-    let mut payload = f.payload(Category::Poor, 10, 0);
-    payload.asset = other.clone();
-    let signed = payload.clone();
     f.refuse(
         &f.recipient,
         &other,
         10,
         Category::Poor,
-        &signed,
         Error::AssetNotApproved,
     );
-}
-
-// --- attestation is untrusted -------------------------------------------------
-
-/// Names whatever account it was built with, standing in for an `attestation`
-/// repointed to an account of an attacker's choosing. Every binding the pool
-/// checks itself must still hold.
-#[contract]
-struct FixedAuthority;
-
-#[contracttype]
-enum FixedKey {
-    Authority,
-}
-
-#[contractimpl]
-impl FixedAuthority {
-    pub fn __constructor(env: Env, authority: Address) {
-        env.storage()
-            .instance()
-            .set(&FixedKey::Authority, &authority);
-    }
-
-    pub fn authority(env: Env) -> Address {
-        env.storage().instance().get(&FixedKey::Authority).unwrap()
-    }
-}
-
-/// Answers with something that is not an address.
-#[contract]
-struct NonsenseAuthority;
-
-#[contractimpl]
-impl NonsenseAuthority {
-    pub fn authority(_env: Env) -> u32 {
-        7
-    }
-}
-
-fn point_at_verifier(f: &Fixture, verifier: &Address) {
-    f.env.as_contract(&f.pool, || {
-        f.env
-            .storage()
-            .instance()
-            .set(&DataKey::AttestAddr, verifier);
-    });
-}
-
-#[test]
-fn a_verifier_answering_nonsense_is_rejected() {
-    let f = setup();
-    f.give();
-    let verifier = f.env.register(NonsenseAuthority, ());
-    point_at_verifier(&f, &verifier);
-    let signed = f.payload(Category::Poor, 10, 0);
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        10,
-        Category::Poor,
-        &signed,
-        Error::AttestationRejected,
-    );
-}
-
-#[test]
-fn the_pool_checks_its_bindings_even_under_a_repointed_attestation() {
-    let f = setup();
-    f.give();
-    let attacker = Address::generate(&f.env);
-    let verifier = f.env.register(FixedAuthority, (attacker,));
-    point_at_verifier(&f, &verifier);
-    let other = Address::generate(&f.env);
-    let other_network = BytesN::from_array(&f.env, &[9u8; 32]);
-    f.refuse_edited(|p| p.expiry_ledger = START_LEDGER, Error::Expired);
-    f.refuse_edited(|p| p.sequence = 5, Error::SequenceMismatch);
-    f.refuse_edited(|p| p.pool = other, Error::WrongPool);
-    f.refuse_edited(|p| p.network_id = other_network, Error::WrongNetwork);
-    f.refuse_edited(|p| p.amount = 1, Error::AttestationMismatch);
 }
 
 // --- a token that does not move what it is asked to ----------------------------
@@ -1066,7 +758,7 @@ enum FeeKey {
     Balance(Address),
 }
 
-/// Keeps 1 unit of every transfer, which no Stellar Asset Contract does.
+/// A token that keeps 1 unit of every transfer, which no Stellar Asset Contract does.
 #[contract]
 struct FeeToken;
 
@@ -1109,7 +801,7 @@ fn a_contribution_that_arrives_short_is_refused() {
     );
 }
 
-// --- pause and distributor disable --------------------------------------------
+// --- pause ---------------------------------------------------------------------
 
 #[test]
 fn pause_blocks_contribute_at_once_and_does_not_block_distribute() {
@@ -1129,9 +821,7 @@ fn pause_blocks_contribute_at_once_and_does_not_block_distribute() {
     );
     assert_eq!(f.state(), before);
 
-    let signed = f.payload(Category::Poor, 10, 0);
-    f.client()
-        .distribute(&f.recipient, &f.asset, &10, &Category::Poor, &signed);
+    f.pay(Category::Poor, 10);
     assert_eq!(f.token().balance(&f.recipient), 10);
 }
 
@@ -1147,30 +837,8 @@ fn resume_reopens_contributions() {
     f.give();
 }
 
-#[test]
-fn disabling_the_distributor_blocks_distribute_at_once() {
-    let f = setup();
-    f.give();
-    f.client().disable_distributor();
-    assert_eq!(
-        f.env.events().all().filter_by_contract(&f.pool),
-        std::vec![DistributorDisabled {}.to_xdr(&f.env, &f.pool)]
-    );
-    let signed = f.payload(Category::Poor, 10, 0);
-    f.refuse(
-        &f.recipient,
-        &f.asset,
-        10,
-        Category::Poor,
-        &signed,
-        Error::DistributorDisabled,
-    );
-    // Contributions are not affected.
-    f.give();
-}
-
-/// A call that governance alone may make, tried by someone else. An unmet
-/// `require_auth` is a host error, so there is no typed variant to assert.
+/// Tries a call that one role alone may make when someone else signs it. An unmet
+/// `require_auth` is a host error. A typed variant cannot be asserted for it.
 fn outsider_cannot(f: &Fixture, fn_name: &str, args: Vec<soroban_sdk::Val>, call: impl FnOnce()) {
     let stranger = Address::generate(&f.env);
     f.env.mock_auths(&[MockAuth {
@@ -1187,20 +855,17 @@ fn outsider_cannot(f: &Fixture, fn_name: &str, args: Vec<soroban_sdk::Val>, call
 }
 
 #[test]
-fn only_governance_can_use_the_instant_controls() {
+fn only_governance_can_pause_and_resume() {
     let f = setup();
     let empty = Vec::new(&f.env);
     outsider_cannot(&f, "pause_contributions", empty.clone(), || {
         assert!(f.client().try_pause_contributions().is_err());
     });
-    outsider_cannot(&f, "resume_contributions", empty.clone(), || {
+    f.client().pause_contributions();
+    outsider_cannot(&f, "resume_contributions", empty, || {
         assert!(f.client().try_resume_contributions().is_err());
     });
-    outsider_cannot(&f, "disable_distributor", empty, || {
-        assert!(f.client().try_disable_distributor().is_err());
-    });
-    assert!(!f.client().is_paused());
-    assert!(!f.client().is_distributor_disabled());
+    assert!(f.client().is_paused());
 }
 
 // --- the timelock --------------------------------------------------------------
@@ -1263,23 +928,24 @@ fn a_change_executes_after_the_delay_and_each_step_emits_its_event() {
     );
     assert_eq!(f.client().pending_change(), None);
 
-    // The new split is what the next contribution uses.
+    // The new split must be used by the next contribution.
     f.give();
     assert_eq!(f.client().balances(&f.asset).get_unchecked(0), 250_000);
 }
 
 #[test]
-fn a_change_can_be_cancelled_and_emits_its_event() {
+fn governance_can_cancel_a_change_and_the_event_names_it() {
     let f = setup();
     let change = Change::SetAllocation(next_allocation(&f));
     let execute_after = f.client().propose_change(&change);
 
-    f.client().cancel_change();
+    f.client().cancel_change(&f.governance);
     assert_eq!(
         f.env.events().all().filter_by_contract(&f.pool),
         std::vec![ChangeCancelled {
             change,
             execute_after,
+            by: f.governance.clone(),
         }
         .to_xdr(&f.env, &f.pool)]
     );
@@ -1297,11 +963,66 @@ fn a_change_can_be_cancelled_and_emits_its_event() {
 }
 
 #[test]
+fn the_approval_multisig_cancels_a_stolen_governance_quorums_takeover() {
+    // Governance keys are stolen, and a new approval account is queued by the
+    // thief. It can be cancelled by the signers it would replace, and the funds
+    // cannot be moved.
+    let f = setup();
+    f.give();
+    let thief = Address::generate(&f.env);
+    let change = Change::SetAuthority(thief);
+    let execute_after = f.client().propose_change(&change);
+
+    f.client().cancel_change(&f.authority);
+    let (who, _) = f.env.auths().first().cloned().unwrap();
+    assert_eq!(who, f.authority);
+    assert_eq!(
+        f.env.events().all().filter_by_contract(&f.pool),
+        std::vec![ChangeCancelled {
+            change,
+            execute_after,
+            by: f.authority.clone(),
+        }
+        .to_xdr(&f.env, &f.pool)]
+    );
+
+    f.past_timelock(execute_after);
+    assert_eq!(
+        f.client().try_execute_change(),
+        Err(Ok(Error::NoPendingChange))
+    );
+    assert_eq!(f.client().authority(), f.authority);
+}
+
+#[test]
+fn a_stranger_cannot_cancel() {
+    let f = setup();
+    let change = Change::SetAllocation(next_allocation(&f));
+    f.client().propose_change(&change);
+    let stranger = Address::generate(&f.env);
+    assert_eq!(
+        f.client().try_cancel_change(&stranger),
+        Err(Ok(Error::Unauthorised))
+    );
+    // A cancel cannot be made by naming a role. It can only be made via that
+    // role's authorisation.
+    outsider_cannot(
+        &f,
+        "cancel_change",
+        (f.authority.clone(),).into_val(&f.env),
+        || {
+            assert!(f.client().try_cancel_change(&f.authority).is_err());
+        },
+    );
+    assert!(f.client().pending_change().is_some());
+}
+
+#[test]
 fn a_cancelled_slot_can_be_used_again_with_a_fresh_delay() {
     let f = setup();
     let change = Change::SetAllocation(next_allocation(&f));
     f.client().propose_change(&change);
-    f.client().cancel_change();
+    f.client().cancel_change(&f.governance);
     f.env.ledger().set_sequence_number(START_LEDGER + 50);
     assert_eq!(
         f.client().propose_change(&change),
@@ -1328,13 +1049,13 @@ fn execute_and_cancel_need_a_queued_change() {
         Err(Ok(Error::NoPendingChange))
     );
     assert_eq!(
-        f.client().try_cancel_change(),
+        f.client().try_cancel_change(&f.governance),
         Err(Ok(Error::NoPendingChange))
     );
 }
 
 #[test]
-fn a_caller_without_governance_cannot_change_the_policy() {
+fn only_governance_can_propose_and_execute() {
     let f = setup();
     let change = Change::SetAllocation(next_allocation(&f));
 
@@ -1348,16 +1069,24 @@ fn a_caller_without_governance_cannot_change_the_policy() {
     );
     assert_eq!(f.client().pending_change(), None);
 
-    // Queued by governance, it still cannot be pushed through by someone else.
+    // A change queued by governance cannot be pushed through by anyone else, the
+    // approval multisig included.
     let execute_after = f.client().propose_change(&change);
     f.past_timelock(execute_after);
-    let empty = Vec::new(&f.env);
-    outsider_cannot(&f, "execute_change", empty.clone(), || {
+    outsider_cannot(&f, "execute_change", Vec::new(&f.env), || {
         assert!(f.client().try_execute_change().is_err());
     });
-    outsider_cannot(&f, "cancel_change", empty, || {
-        assert!(f.client().try_cancel_change().is_err());
-    });
+    f.env.mock_auths(&[MockAuth {
+        address: &f.authority,
+        invoke: &MockAuthInvoke {
+            contract: &f.pool,
+            fn_name: "execute_change",
+            args: Vec::new(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client().try_execute_change().is_err());
+    f.env.mock_all_auths();
     assert!(f.client().pending_change().is_some());
 }
 
@@ -1418,11 +1147,9 @@ fn policy_answering_to(f: &Fixture, controller: &Address) -> Address {
 }
 
 #[test]
-fn policy_and_attestation_repoint_through_the_timelock() {
+fn policy_repoints_through_the_timelock() {
     let f = setup();
     let new_policy = policy_answering_to(&f, &f.pool);
-    let new_attestation = Address::generate(&f.env);
-
     let after = f
         .client()
         .propose_change(&Change::SetPolicy(new_policy.clone()));
@@ -1430,14 +1157,6 @@ fn policy_and_attestation_repoint_through_the_timelock() {
     f.past_timelock(after);
     f.client().execute_change();
     assert_eq!(f.client().policy(), new_policy);
-
-    let after = f
-        .client()
-        .propose_change(&Change::SetAttestation(new_attestation.clone()));
-    assert_eq!(f.client().attestation(), f.attestation);
-    f.past_timelock(after);
-    f.client().execute_change();
-    assert_eq!(f.client().attestation(), new_attestation);
 }
 
 #[test]
@@ -1466,6 +1185,39 @@ fn a_policy_address_with_no_contract_is_refused() {
         Err(Ok(Error::PolicyControllerMismatch))
     );
     assert_eq!(f.client().policy(), f.policy);
+}
+
+#[test]
+fn a_new_approval_multisig_takes_the_delay_and_then_alone_approves() {
+    // The approval keys are lost: the account can only be replaced via governance,
+    // with nobody left to cancel.
+    let f = setup();
+    f.give();
+    let replacement = Address::generate(&f.env);
+    let after = f
+        .client()
+        .propose_change(&Change::SetAuthority(replacement.clone()));
+    assert_eq!(f.client().authority(), f.authority);
+    f.past_timelock(after);
+    f.client().execute_change();
+    assert_eq!(f.client().authority(), replacement);
+
+    assert!(!f.submit_with_approval(&f.authority, f.payout(10), f.payout(10)));
+    assert!(f.submit_with_approval(&replacement, f.payout(10), f.payout(10)));
+}
+
+#[test]
+fn governance_cannot_become_the_approval_multisig() {
+    let f = setup();
+    let after = f
+        .client()
+        .propose_change(&Change::SetAuthority(f.governance.clone()));
+    f.past_timelock(after);
+    assert_eq!(
+        f.client().try_execute_change(),
+        Err(Ok(Error::RolesOverlap))
+    );
+    assert_eq!(f.client().authority(), f.authority);
 }
 
 #[test]
@@ -1503,43 +1255,6 @@ fn approving_an_approved_asset_is_refused() {
     assert_eq!(
         f.client().try_execute_change(),
         Err(Ok(Error::AssetAlreadyApproved))
-    );
-}
-
-#[test]
-fn a_new_distributor_takes_the_delay_and_lifts_the_disable() {
-    let f = setup();
-    f.give();
-    f.client().disable_distributor();
-    let replacement = Address::generate(&f.env);
-    let after = f
-        .client()
-        .propose_change(&Change::SetDistributor(replacement.clone()));
-    assert!(f.client().is_distributor_disabled());
-    f.past_timelock(after);
-    f.client().execute_change();
-    assert_eq!(f.client().distributor(), replacement);
-    assert!(!f.client().is_distributor_disabled());
-
-    let mut payload = f.payload(Category::Poor, 10, 0);
-    payload.expiry_ledger = f.env.ledger().sequence() + 100;
-    let signed = payload.clone();
-    f.client()
-        .distribute(&f.recipient, &f.asset, &10, &Category::Poor, &signed);
-    let (who, _) = f.env.auths().first().cloned().unwrap();
-    assert_eq!(who, replacement);
-}
-
-#[test]
-fn governance_cannot_become_the_distributor() {
-    let f = setup();
-    let after = f
-        .client()
-        .propose_change(&Change::SetDistributor(f.governance.clone()));
-    f.past_timelock(after);
-    assert_eq!(
-        f.client().try_execute_change(),
-        Err(Ok(Error::RolesOverlap))
     );
 }
 
@@ -1592,13 +1307,12 @@ fn assert_invariant(f: &Fixture, asset: &Address) {
 }
 
 /// Runs a seeded mix of gifts, payouts, oversized payouts and direct transfers,
-/// checking after every step that the buckets never exceed the balance.
+/// and checks after every step that the buckets never exceed the balance.
 fn run_invariant(seed: u64, steps: u32) {
     let f = setup();
     f.env.cost_estimate().budget().reset_unlimited();
     token::StellarAssetClient::new(&f.env, &f.asset).mint(&f.donor, &(i64::MAX as i128));
     let mut rng = Rng(seed);
-    let mut sequence = 0u64;
     let mut surplus = 0i128;
     let mut paid = 0i128;
     let mut given = 0i128;
@@ -1615,14 +1329,11 @@ fn run_invariant(seed: u64, steps: u32) {
                 let bucket = f.client().balances(&f.asset).get_unchecked(index);
                 let amount = (rng.next() as i128) % (bucket * 2 + 1) + 1;
                 let category: Category = ALL[index as usize];
-                let payload = f.payload(category, amount, sequence);
-                let signed = payload.clone();
-                let result =
-                    f.client()
-                        .try_distribute(&f.recipient, &f.asset, &amount, &category, &signed);
+                let result = f
+                    .client()
+                    .try_distribute(&f.recipient, &f.asset, &amount, &category);
                 if amount <= bucket {
                     assert!(result.is_ok());
-                    sequence += 1;
                     paid += amount;
                 } else {
                     assert_eq!(result, Err(Ok(Error::InsufficientBucket)));
@@ -1663,8 +1374,8 @@ fn the_buckets_never_exceed_the_balance_across_seeded_runs() {
 
 #[test]
 fn the_contract_refuses_when_the_balance_falls_under_the_buckets() {
-    // Only a token misbehaving outside the pool can cause this. The assert
-    // inside `contribute` must catch it rather than record it.
+    // This state can only be caused by a token misbehaving outside the pool. It
+    // must be caught by the assert inside `contribute` rather than recorded.
     let f = setup();
     f.give();
     f.env.as_contract(&f.pool, || {
@@ -1704,13 +1415,8 @@ fn each_assets_solvency_stands_alone() {
     assert_invariant(&f, &f.asset);
     assert_invariant(&f, &second);
 
-    // A signature for the first asset does not spend the second.
-    let mut payload = f.payload(Category::Poor, 100, 0);
-    payload.expiry_ledger = f.env.ledger().sequence() + 100;
-    let signed = payload.clone();
-    assert_eq!(
-        f.client()
-            .try_distribute(&f.recipient, &second, &100, &Category::Poor, &signed),
-        Err(Ok(Error::WrongAsset))
-    );
+    // The second asset cannot be spent by an approval for the first.
+    let submitted = (f.recipient.clone(), second.clone(), 100, Category::Poor);
+    assert!(!f.submit_with_approval(&f.authority, submitted, f.payout(100)));
+    assert_eq!(token::Client::new(&f.env, &second).balance(&f.recipient), 0);
 }

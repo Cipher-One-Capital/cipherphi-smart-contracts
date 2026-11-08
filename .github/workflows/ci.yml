@@ -1,4 +1,4 @@
-# The checks every pull request has to pass.
+# The checks that every pull request has to pass.
 name: CI
 
 on:
@@ -32,7 +32,7 @@ jobs:
           workspaces: contracts
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
-      # Every refusal, and the solvency invariant across seeded runs.
+      # Tests every refusal and the solvency invariant across seeded runs.
       - run: cargo test --locked
 
   fuzz:
@@ -95,7 +95,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The whole history, not only the tip.
+          # A fetch depth that pulls the whole history, not only the tip.
           fetch-depth: 0
       - run: |
           curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks

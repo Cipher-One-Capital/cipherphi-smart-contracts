@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The harness both fuzz targets share: the real three contracts, and the
-//! solvency invariant they assert after every call.
+//! A harness that both fuzz targets share, holding the real contracts and the solvency
+//! invariant they assert after every call.
 
-use attestation::{Attestation as AttestationContract, AttestationArgs};
 use policy::{Allocation, DischargeTiming, NisabBasis, Parameters, Policy, PolicyArgs};
 use soroban_sdk::{
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
     token, Address, Env, IntoVal, InvokeError, Vec,
 };
 use zakat_pool::{
-    Attestation, Category, Error, ZakatPool, ZakatPoolArgs, ZakatPoolClient, MIN_TIMELOCK_LEDGERS,
+    Category, Error, ZakatPool, ZakatPoolArgs, ZakatPoolClient, MIN_TIMELOCK_LEDGERS,
 };
 
 pub const START_LEDGER: u32 = 100;
@@ -31,7 +30,6 @@ pub struct Harness {
     pub asset: Address,
     pub donor: Address,
     pub recipient: Address,
-    pub distributor: Address,
     pub authority: Address,
 }
 
@@ -49,9 +47,8 @@ impl Harness {
             .address();
         token::StellarAssetClient::new(&env, &asset).mint(&donor, &(i64::MAX as i128));
 
-        let distributor = Address::generate(&env);
-        // The approval account. Its 2-of-3 threshold is Stellar's to enforce
-        // and is not modelled here; the harness models whether it approved.
+        // The approval account, used to model whether the account approved.
+        // Its 2-of-3 threshold can only be enforced by Stellar and is not modelled here.
         let authority = Address::generate(&env);
 
         let pool = Address::generate(&env);
@@ -71,22 +68,20 @@ impl Harness {
                 },
             ),
         );
-        let attestation = env.register(
-            AttestationContract,
-            AttestationArgs::__constructor(&authority),
-        );
         env.register_at(
             &pool,
             ZakatPool,
             ZakatPoolArgs::__constructor(
                 &Address::generate(&env),
-                &distributor,
+                &authority,
                 &policy,
-                &attestation,
                 &asset,
                 &MIN_TIMELOCK_LEDGERS,
             ),
         );
+        // The pool is deployed closed, and contributions cannot be accepted until it is opened.
+        // This opens it as governance would to let contributions through.
+        ZakatPoolClient::new(&env, &pool).resume_contributions();
 
         Self {
             env,
@@ -94,7 +89,6 @@ impl Harness {
             asset,
             donor,
             recipient,
-            distributor,
             authority,
         }
     }
@@ -111,7 +105,7 @@ impl Harness {
         token::Client::new(&self.env, &self.asset).balance(&self.pool)
     }
 
-    /// The buckets never exceed the balance, and no bucket is negative.
+    /// Asserts that the buckets never exceed the balance and that no bucket is negative.
     pub fn assert_invariant(&self) {
         let claimed = self.claimed();
         let held = self.held();
@@ -119,48 +113,33 @@ impl Harness {
         assert!(self.client().balances(&self.asset).iter().all(|b| b >= 0));
     }
 
-    /// Attempt a payout authorised by the distributor and, if `approved`, by the
-    /// approval account over `payload`. Without its approval the call fails.
+    /// Attempts a payout of `amount` from `category` to the recipient, with the approval
+    /// account's authorisation of the `approved` arguments when `approved` is set, and with
+    /// no authorisation at all otherwise.
+    /// The approved arguments can be different from the submitted ones.
     pub fn try_distribute(
         &self,
         category: Category,
         amount: i128,
-        payload: &Attestation,
-        approved: bool,
+        approved: Option<(Address, Address, i128, Category)>,
     ) -> Result<Result<(), soroban_sdk::ConversionError>, Result<Error, InvokeError>> {
-        let full = MockAuthInvoke {
+        let invoke = approved.map(|args| MockAuthInvoke {
             contract: &self.pool,
             fn_name: "distribute",
-            args: (
-                self.recipient.clone(),
-                self.asset.clone(),
-                amount,
-                category,
-                payload.clone(),
-            )
-                .into_val(&self.env),
+            args: args.into_val(&self.env),
             sub_invokes: &[],
-        };
-        let approval = MockAuthInvoke {
-            contract: &self.pool,
-            fn_name: "distribute",
-            args: (payload.clone(),).into_val(&self.env),
-            sub_invokes: &[],
-        };
-        let mut mocks = std::vec![MockAuth {
-            address: &self.distributor,
-            invoke: &full,
-        }];
-        if approved {
-            mocks.push(MockAuth {
+        });
+        let mocks: std::vec::Vec<MockAuth> = invoke
+            .iter()
+            .map(|invoke| MockAuth {
                 address: &self.authority,
-                invoke: &approval,
-            });
-        }
+                invoke,
+            })
+            .collect();
         self.env.mock_auths(&mocks);
-        let result =
-            self.client()
-                .try_distribute(&self.recipient, &self.asset, &amount, &category, payload);
+        let result = self
+            .client()
+            .try_distribute(&self.recipient, &self.asset, &amount, &category);
         self.env.mock_all_auths();
         result
     }

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Produce the SEP-58 source archive of the contract workspace and print its
-# source_sha256. GNU tar runs inside the pinned image with every varying field
-# fixed, and the file list comes from git, so the same commit always gives the
-# same bytes. The fuzz crate is left out: it is not part of what is deployed.
+# Produces the SEP-58 source archive of the contract workspace and prints its source_sha256.
+# This runs GNU tar inside the pinned image with every varying field fixed and takes the
+# file list from git to give the same bytes from the same commit every time.
+# This leaves out the fuzz crate to keep the archive to what is deployed.
 
 . "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 

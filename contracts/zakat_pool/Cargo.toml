@@ -16,4 +16,3 @@ cipherphi_interface = { workspace = true }
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 policy = { workspace = true }
-attestation = { workspace = true }

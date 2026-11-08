@@ -16,7 +16,6 @@ soroban-sdk = { version = "27.0.6", features = ["testutils"] }
 cipherphi_interface = { path = "../interface" }
 zakat_pool = { path = "../zakat_pool" }
 policy = { path = "../policy" }
-attestation = { path = "../attestation" }
 
 [lib]
 path = "src/lib.rs"
