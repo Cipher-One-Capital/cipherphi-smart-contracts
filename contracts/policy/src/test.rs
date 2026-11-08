@@ -4,10 +4,10 @@
 extern crate std;
 
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, AuthorizedFunction, MockAuth, MockAuthInvoke},
     vec,
     xdr::ToXdr,
-    Address, Env, IntoVal, Vec,
+    Address, Env, IntoVal, Symbol, Val, Vec,
 };
 
 use crate::{
@@ -282,9 +282,31 @@ fn an_administrators_share_above_the_cap_is_refused() {
     );
 }
 
+/// Asserts that `controller` alone authorised the most recent call, and that the
+/// call was `fn_name` on `id` with exactly `args`.
+///
+/// A role cannot be proven by `mock_all_auths` alone. This reads the recorded
+/// authorisation to catch a setter that checks the wrong address.
+fn assert_authorised_by(
+    env: &Env,
+    id: &Address,
+    controller: &Address,
+    fn_name: &str,
+    args: Vec<Val>,
+) {
+    let auths = env.auths();
+    assert_eq!(auths.len(), 1, "wanted one authorisation for {fn_name}");
+    let (who, invocation) = auths[0].clone();
+    assert_eq!(&who, controller);
+    assert_eq!(
+        invocation.function,
+        AuthorizedFunction::Contract((id.clone(), Symbol::new(env, fn_name), args))
+    );
+}
+
 #[test]
 fn the_controller_can_set_valid_values() {
-    let (env, id, _) = setup();
+    let (env, id, controller) = setup();
     env.mock_all_auths();
     let client = PolicyClient::new(&env, &id);
 
@@ -294,12 +316,26 @@ fn the_controller_can_set_valid_values() {
         Category::Needy,
     );
     client.set_allocation(&next);
+    assert_authorised_by(
+        &env,
+        &id,
+        &controller,
+        "set_allocation",
+        (next.clone(),).into_val(&env),
+    );
     assert_eq!(client.allocation(), next);
 
     let mut p = parameters();
     p.nisab_basis = NisabBasis::Silver;
     p.discharge_timing = DischargeTiming::Delivered;
     client.set_parameters(&p);
+    assert_authorised_by(
+        &env,
+        &id,
+        &controller,
+        "set_parameters",
+        (p.clone(),).into_val(&env),
+    );
     assert_eq!(client.parameters(), p);
 }
 
