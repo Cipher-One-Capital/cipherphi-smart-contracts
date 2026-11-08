@@ -116,6 +116,8 @@ pub enum Error {
     RecipientAlreadyApproved = 41,
     /// The recipient is the governance or approval account.
     RecipientIsRole = 42,
+    /// The configuration entry is missing.
+    Unconfigured = 43,
 }
 
 /// The event that `contribute` emits, with the whole split in [`Category`]
