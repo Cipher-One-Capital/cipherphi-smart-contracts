@@ -4,13 +4,13 @@ CipherPhi is the layer that moves an operating, audited Swiss zakat foundation o
 
 This file is the architecture record that sets out what is built, why each decision was settled the way it was, and what is deliberately not built. A component a reader might expect can only be absent if it is named under "Exclusions", with the trigger that would change it.
 
-## Moat
+## Differentiation
 
 Onchain zakat is an idea that predates this project. HAQQ is a chain that routes a tenth of every ISLM issuance into the Evergreen DAO endowment for Islamic charity,[^1] Zakat Coin is one of several tokens that have proposed donor-facing zakat platforms,[^2] and the academic literature is a body of work that carries several blockchain zakat collection and distribution models.[^3] Almost all of them are designs where the chain came first and the institution second: a new token, a new DAO, or a paper design, looking for a zakat body to adopt it.
 
 CipherPhi is a design that runs the other way. The Swiss Zakat Foundation is an institution that already collects and redistributes zakat under federal supervision, with audited accounts and a working eligibility process, and this project is the step that puts its rail onchain.
 
-The contract is the part that cannot be defended. It is a few thousand lines of Rust that any competent team could write. This publishes the design rather than guarding it to show that the moat lies elsewhere. The moat is the institution that already exists: the collection, the donor base, the vetting process, the partner network, and the audit relationship can only be moved, not invented. A competitor starting today is a team that writes the contract in a month and then spends years becoming a supervised foundation with an unqualified audit opinion.
+The contract is the part that cannot be defended. It is a few thousand lines of Rust that any competent team could write. This publishes the design rather than guarding it to show that the advantage lies elsewhere. The advantage is the institution that already exists: the collection, the donor base, the vetting process, the partner network, and the audit relationship can only be moved, not invented. A competitor starting today is a team that writes the contract in a month and then spends years becoming a supervised foundation with an unqualified audit opinion.
 
 ## Stellar
 
