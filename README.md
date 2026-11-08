@@ -29,8 +29,8 @@ The revision 5 contracts run on Stellar testnet with Circle's testnet USDC, buil
 
 | Contract | Address | Wasm hash |
 | --- | --- | --- |
-| `zakat_pool` | [`CBMPFDAAAYURRIMTZN76IGNLSP2JPKTPPCBXUBD7TXKFYVI2FYYF6BAW`](https://stellar.expert/explorer/testnet/contract/CBMPFDAAAYURRIMTZN76IGNLSP2JPKTPPCBXUBD7TXKFYVI2FYYF6BAW) | `100459f23aaa84435dd1c94a2c67055669021cc21a73bafb2e11d9ff16ce9786` |
-| `policy` | [`CBXBPITVYR5M6QPZAHV6QCAJO2LCS547K3OVBTVJVD6Z742OUHFTSKCU`](https://stellar.expert/explorer/testnet/contract/CBXBPITVYR5M6QPZAHV6QCAJO2LCS547K3OVBTVJVD6Z742OUHFTSKCU) | `9ba5e7602e314a60b881ded49795ee342593a4cc234fe6c9680868f5cacc3f92` |
+| `zakat_pool` | [`CAQE5QMVPPRDAUC74XJELAIZIVKZ2NHQHATR73EKMZIGXMLPK6ND6HIN`](https://stellar.expert/explorer/testnet/contract/CAQE5QMVPPRDAUC74XJELAIZIVKZ2NHQHATR73EKMZIGXMLPK6ND6HIN) | `5b7559d13778e35567ca3dc470d5543f13be3ba9986c96b42ecb863822afb613` |
+| `policy` | [`CDU3226YBRAC725VV3AUMEQNU2H7E7JN4JF5MFFSSWFRZBD7O4KMM47I`](https://stellar.expert/explorer/testnet/contract/CDU3226YBRAC725VV3AUMEQNU2H7E7JN4JF5MFFSSWFRZBD7O4KMM47I) | `2186bddb84ad64efbe29d011fe1fec1e38a003c86df4c5911f2ad22f206ca892` |
 
 Governance [`GCL2VC…PLXX`](https://stellar.expert/explorer/testnet/account/GCL2VCSOWEF6XUCBCD6TQ5URQAE3R4NAGRPEBZ7VGKPGMMQI6VM3PLXX) and the approval multisig [`GCP4SH…2BMV`](https://stellar.expert/explorer/testnet/account/GCP4SHHS7A2JA4KH6S4V3UTEDI263Z34RHSF6TE63DUAMTVN2XYG2BMV) are 2-of-3 accounts with the master key at weight 0. The pool's one approved recipient is the test partner [`GD6O4N…3NQR`](https://stellar.expert/explorer/testnet/account/GD6O4NBIFK2PVUM2CMJIPYX5PWBM74GXF4ASXYLAQRO4C7IA5WJI3NQR). The `policy` split and parameters are placeholders, not validated by the Shariah authority.
 
