@@ -47,8 +47,8 @@ fn setup() -> (Env, Address, Address) {
     (env, id, controller)
 }
 
-/// `register` panics on a constructor error, so the refusal is read from the
-/// panic message rather than from a typed result.
+/// Returns the refusal from the panic message when `register` panics on a constructor error.
+/// The refusal can only be read from the panic message, not from a typed result.
 fn refusal_of(register: impl FnOnce()) -> std::string::String {
     let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(register))
         .expect_err("the constructor accepted arguments it should have refused");
@@ -102,7 +102,7 @@ fn allocate_follows_the_placeholder_split() {
 #[test]
 fn the_rounding_remainder_goes_to_the_configured_category() {
     let (env, id, _) = setup();
-    // 1 stroop: every floor is zero, so the remainder takes it all.
+    // A 1-stroop amount can only be credited to the remainder, since every floor is zero.
     assert_eq!(
         PolicyClient::new(&env, &id).allocate(&1),
         vec![&env, 1, 0, 0, 0, 0, 0, 0, 0]
@@ -217,6 +217,19 @@ fn a_remainder_with_no_share_is_refused() {
 }
 
 #[test]
+fn the_administrators_cannot_take_the_remainder() {
+    // The remainder cannot be assigned to Administrators, even when their basis points sit
+    // under the cap. This refuses the pairing to keep the remainder from carrying their
+    // credit past the cap by a few units.
+    refused_at_construction(
+        &PLACEHOLDER,
+        Category::Administrators,
+        parameters(),
+        Error::RemainderToAdministrators,
+    );
+}
+
+#[test]
 fn an_amil_cap_above_its_band_is_refused() {
     let mut p = parameters();
     p.amil_cap_bps = MAX_AMIL_CAP_BPS + 1;
@@ -237,7 +250,7 @@ fn a_rate_outside_its_band_is_refused() {
     refused_at_construction(&PLACEHOLDER, Category::Poor, p, Error::RateOutOfBand);
 }
 
-/// Every bound is inclusive: a value exactly at its limit is accepted.
+/// Checks that a value exactly at its limit is accepted, since every bound is inclusive.
 #[test]
 fn values_exactly_at_their_bounds_are_accepted() {
     let env = Env::default();
@@ -301,7 +314,7 @@ fn the_setters_apply_the_same_bounds() {
         client.try_set_allocation(&allocation(&env, &[1; 8], Category::Poor)),
         Err(Ok(Error::SplitSum))
     );
-    // A split above the live cap, and a cap below the live split.
+    // A split above the live cap cannot be set, and neither can a cap below the live split.
     assert_eq!(
         client.try_set_allocation(&allocation(
             &env,
@@ -355,9 +368,10 @@ fn a_caller_other_than_the_controller_cannot_set_anything() {
     assert!(client.try_set_parameters(&parameters()).is_err());
 }
 
-/// The deploy script builds the constructor arguments by hand in JavaScript. These
-/// are its bytes, for the placeholder values. If they drift from what this contract
-/// decodes, the failure belongs here rather than on the network.
+/// Checks the bytes that the deploy script, published before security review (see
+/// ARCHITECTURE.md), builds by hand in JavaScript for the constructor arguments when they
+/// hold the placeholder values. This pins those bytes to make a drift from what this contract
+/// decodes fail here rather than on the network.
 #[test]
 fn the_deploy_script_encodes_arguments_as_the_contract_decodes_them() {
     fn hex(value: soroban_sdk::Bytes) -> std::string::String {

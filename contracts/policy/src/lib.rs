@@ -2,16 +2,17 @@
 
 //! # policy
 //!
-//! Holds the 8-category split and the Shariah parameters, and computes the
-//! allocation of a contribution. It holds no funds and cannot call back into
-//! the pool.
+//! The contract that holds the 8-category split and the Shariah parameters, and
+//! computes the allocation of a contribution. It holds no funds and makes no call
+//! to the pool.
 //!
-//! Every value is bounds-checked at the setter. The setters answer only to the
-//! `controller`, which is the `zakat_pool` contract, so a change reaches this
-//! contract only through governance and the pool's 7-day timelock.
+//! Every value is bounds-checked at the setter, and the setters can only be
+//! called by the `controller`, which is the `zakat_pool` contract. This answers
+//! only to the pool to keep every change behind governance and the pool's
+//! timelock.
 //!
-//! The deployed values are placeholders. They are not the Swiss Zakat
-//! Foundation's allocation and the Shariah authority has not validated them.
+//! The deployed values are placeholders: they are not the Swiss Zakat
+//! Foundation's allocation, and the Shariah authority has not validated them.
 //!
 //! Testnet only, and unaudited.
 
@@ -24,10 +25,12 @@ pub use cipherphi_interface::{Allocation, Category, DischargeTiming, NisabBasis,
 use cipherphi_interface::{BPS_TOTAL, CATEGORY_COUNT};
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Vec};
 
-/// The widest administrators' share any setting may allow. A technical bound on
-/// bad input, not a religious ruling: the validated cap sits inside this band.
+/// The widest administrators' share that any setting can allow.
+///
+/// The bound is technical, not a religious ruling, and the validated cap sits
+/// inside it. This rejects bad input to keep every setting inside a sane band.
 pub const MAX_AMIL_CAP_BPS: u32 = 2_500;
-/// The widest zakat rate any setting may allow, on the same basis.
+/// The widest zakat rate that any setting can allow, on the same basis.
 pub const MAX_RATE_BPS: u32 = 1_000;
 
 #[contracttype]
@@ -42,9 +45,9 @@ enum DataKey {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    /// Non-positive amount.
+    /// The amount is not positive.
     InvalidAmount = 2,
-    /// Checked arithmetic said no.
+    /// The arithmetic overflows.
     Overflow = 4,
     /// The split does not have exactly 8 elements.
     SplitLength = 30,
@@ -58,6 +61,9 @@ pub enum Error {
     RateOutOfBand = 34,
     /// The administrators' share is above the amil cap.
     AdministratorsAboveCap = 35,
+    /// The remainder category is the administrators. This refuses it to stop the
+    /// rounding remainder from carrying their credit past the amil cap.
+    RemainderToAdministrators = 36,
 }
 
 #[contract]
@@ -65,8 +71,12 @@ pub struct Policy;
 
 #[contractimpl]
 impl Policy {
-    /// `controller` is the pool. The deploy script computes the pool's address
-    /// before deploying this contract, since each needs the other's.
+    /// Stores the controller, the split and the parameters when the contract is
+    /// deployed.
+    ///
+    /// The controller is the pool, whose address the deploy script computes before
+    /// this contract is deployed. This orders deployment to let each contract name
+    /// the other.
     pub fn __constructor(
         env: Env,
         controller: Address,
@@ -99,10 +109,11 @@ impl Policy {
         Ok(())
     }
 
-    /// Split `amount` into 8 amounts in [`Category`] order.
+    /// Splits `amount` into 8 amounts in [`Category`] order.
     ///
-    /// Every category but the remainder is floor-divided and the remainder takes
-    /// what is left, so the total is exact by construction.
+    /// Every category but the remainder is floor-divided, and the remainder takes
+    /// what is left. This assigns the leftover to one category to make the total
+    /// exact by construction.
     pub fn allocate(env: Env, amount: i128) -> Result<Vec<i128>, Error> {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -138,8 +149,10 @@ impl Policy {
     }
 }
 
-/// The one place the bounds live. Each setter passes the stored half of the
-/// pair, so a cap can never be lowered beneath the live split or the other way
+/// Rejects an allocation and parameter pair that breaks any bound.
+///
+/// Each setter passes the stored half of the pair. This checks the pair together
+/// to stop a cap from being lowered beneath the live split, or the other way
 /// round.
 fn check(allocation: &Allocation, parameters: &Parameters) -> Result<(), Error> {
     let split = &allocation.split_bps;
@@ -155,6 +168,9 @@ fn check(allocation: &Allocation, parameters: &Parameters) -> Result<(), Error> 
     }
     if split.get_unchecked(allocation.remainder as u32) == 0 {
         return Err(Error::RemainderWithoutShare);
+    }
+    if allocation.remainder == Category::Administrators {
+        return Err(Error::RemainderToAdministrators);
     }
     if parameters.amil_cap_bps > MAX_AMIL_CAP_BPS {
         return Err(Error::AmilCapOutOfBand);

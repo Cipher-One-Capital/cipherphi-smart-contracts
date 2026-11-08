@@ -1,9 +1,9 @@
-# Test keys and private-network deployments. Never committed.
+# The test keys and private-network deployments that can never be committed.
 .secrets*.json
 deployment.local.json
 .env*
 
-# Build output and the regenerated source archive. Rebuilt on demand.
+# The build output and regenerated source archive that can be rebuilt on demand.
 .build/
 out/
 sources/

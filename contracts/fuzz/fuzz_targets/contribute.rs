@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `contribute` under arbitrary amounts and arbitrary valid splits. A success
-//! credits exactly the amount; a refusal changes nothing; the buckets never
-//! exceed the balance.
+//! Fuzzes `contribute` with arbitrary amounts and arbitrary valid splits.
+//! Checks that a success credits exactly the amount, that a refusal changes nothing, and
+//! that the buckets never exceed the balance.
 
 #![no_main]
 
@@ -11,14 +11,14 @@ use libfuzzer_sys::{arbitrary, fuzz_target};
 
 #[derive(arbitrary::Arbitrary, Debug)]
 struct Input {
-    /// Shares of a split, normalised below so that it sums to 10,000.
+    /// The shares of a split that is normalised below to sum to 10,000.
     shares: [u8; 8],
     amounts: Vec<i128>,
     surplus: u32,
 }
 
-/// Turn arbitrary shares into a split the policy accepts: Administrators stays
-/// under the cap, Poor (the remainder) keeps a share and takes what is left.
+/// Turns arbitrary shares into a split the policy accepts, where Administrators stays
+/// under the cap and Poor (the remainder) keeps a share and takes what is left.
 fn split_from(shares: [u8; 8]) -> [u32; 8] {
     let mut split = [0u32; 8];
     let mut left = 10_000u32;
@@ -53,8 +53,9 @@ fuzz_target!(|input: Input| {
     }
     assert_eq!(h.claimed(), credited);
 
-    // Tokens that reach the pool without `contribute` are surplus: they move the
-    // balance and no bucket. Minted, because the gifts may have spent the donor.
+    // A surplus is a token amount that reaches the pool without `contribute`.
+    // A surplus can only move the balance, not a bucket.
+    // This mints the surplus to avoid relying on a donor that the gifts may have spent.
     if input.surplus > 0 {
         let held = h.held();
         soroban_sdk::token::StellarAssetClient::new(&h.env, &h.asset)

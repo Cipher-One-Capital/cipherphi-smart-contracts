@@ -1,83 +1,62 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! What the three CipherPhi contracts agree on: the shared types, and the two
-//! interfaces `zakat_pool` calls. `zakat_pool` links only this crate, never the
-//! other contracts, so their code cannot reach the custody Wasm and it treats
-//! whatever answers at the pinned addresses as untrusted.
+//! The crate that holds what the two CipherPhi contracts share: the types, and
+//! the interface that `zakat_pool` calls.
+//!
+//! `zakat_pool` can only link this crate, never `policy`. This keeps policy code
+//! out of the custody Wasm to let the pool treat whatever answers at the pinned
+//! address as untrusted.
 
 #![no_std]
 
-use soroban_sdk::{contractclient, contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{contractclient, contracttype, Address, Env, Vec};
 
-/// Number of zakat categories, and of elements in every split.
+/// The number of zakat categories, used as the length of every split.
 pub const CATEGORY_COUNT: u32 = 8;
-/// A split sums to this many basis points.
+/// The total, in basis points, that every split sums to.
 pub const BPS_TOTAL: u32 = 10_000;
 
-/// The eight zakat categories of Qur'an 9:60, in the order the verse names
-/// them. Events and views report balances in this order.
+/// The eight zakat categories that Qur'an 9:60 names, in the order the verse
+/// names them.
+///
+/// Balances can only be reported in this order, by events and views alike.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Category {
-    /// al-fuqara, the poor
+    /// The poor (al-fuqara).
     Poor = 0,
-    /// al-masakin, the needy
+    /// The needy (al-masakin).
     Needy = 1,
-    /// al-amilina alayha, those who administer zakat
+    /// The administrators of zakat (al-amilina alayha).
     Administrators = 2,
-    /// al-muallafati qulubuhum, those whose hearts are to be reconciled
+    /// The people whose hearts are to be reconciled (al-muallafati qulubuhum).
     Reconciliation = 3,
-    /// fi al-riqab, freeing captives
+    /// The captives to be freed (fi al-riqab).
     Captives = 4,
-    /// al-gharimin, those in debt
+    /// The people in debt (al-gharimin).
     Debtors = 5,
-    /// fi sabilillah, in the cause of God
+    /// The cause of God (fi sabilillah).
     CauseOfGod = 6,
-    /// ibn al-sabil, the wayfarer
+    /// The wayfarer (ibn al-sabil).
     Wayfarers = 7,
 }
 
-/// The approval for one payout. The approval account authorises `distribute`
-/// with this struct as the only argument, so every field is bound by its
-/// signers' signatures, and Stellar enforces the account's threshold. Its XDR,
-/// hashed, is the `attestation_hash` of the Disbursement event. The encoding is
-/// the demo's, unchanged: see `test_vectors/attestation.json`.
+/// The category split that `policy` applies to every contribution.
 ///
-/// | Field | What an attacker gets if it is not bound |
-/// | --- | --- |
-/// | `recipient` | A valid attestation, redirected. |
-/// | `asset` | A signature approved for one token, spent in another. |
-/// | `category` | A signature approved against one bucket, drawn from another. |
-/// | `amount` | The number raised after signing, before submission. |
-/// | `sequence` | Replay. |
-/// | `expiry_ledger` | An approval that never lapses. |
-/// | `pool` | The same signature, valid against a second deployment. |
-/// | `network_id` | A testnet approval, replayed against mainnet. |
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Attestation {
-    pub recipient: Address,
-    pub asset: Address,
-    pub category: Category,
-    pub amount: i128,
-    pub sequence: u64,
-    pub expiry_ledger: u32,
-    pub pool: Address,
-    pub network_id: BytesN<32>,
-}
-
-/// The category split. A placeholder until the Shariah authority validates it.
+/// The values are placeholders until the Shariah authority validates them.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Allocation {
-    /// Basis points per category, in [`Category`] order, summing to 10,000.
+    /// The basis points per category, in [`Category`] order, summing to 10,000.
     pub split_bps: Vec<u32>,
-    /// The category that absorbs the rounding remainder.
+    /// The category that takes the rounding remainder.
     pub remainder: Category,
 }
 
-/// Gold or silver standard. The price source and timestamp are the app's, and
-/// are shown beside the figure they produce.
+/// The standard, gold or silver, that the nisab threshold is measured in.
+///
+/// The price and its timestamp can only be supplied by the application, and are
+/// shown beside the figure they produce.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NisabBasis {
@@ -94,35 +73,29 @@ pub enum DischargeTiming {
     Delivered = 2,
 }
 
-/// The Shariah parameters other than the split. Placeholders until validated.
+/// The Shariah parameters that `policy` holds besides the split.
+///
+/// The values are placeholders until the Shariah authority validates them.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parameters {
     pub nisab_basis: NisabBasis,
-    /// Zakat rate in basis points. The app's calculator reads it from here.
+    /// The zakat rate in basis points, read by the application's calculator.
     pub rate_bps: u32,
-    /// Ceiling on the administrators' share, in basis points.
+    /// The ceiling on the administrators' share, in basis points.
     pub amil_cap_bps: u32,
     pub discharge_timing: DischargeTiming,
 }
 
-/// What `zakat_pool` needs from `policy`.
+/// The interface that `zakat_pool` calls on `policy`.
 #[contractclient(name = "PolicyClient")]
 pub trait PolicyInterface {
-    /// Split `amount` into 8 amounts in [`Category`] order.
+    /// Splits `amount` into 8 amounts in [`Category`] order.
     fn allocate(env: Env, amount: i128) -> Vec<i128>;
-    /// Replace the split. Authorised by the policy's controller.
+    /// Replaces the split when the controller authorises it.
     fn set_allocation(env: Env, allocation: Allocation);
-    /// Replace the parameters. Authorised by the policy's controller.
+    /// Replaces the parameters when the controller authorises it.
     fn set_parameters(env: Env, parameters: Parameters);
-    /// The one address the setters answer to.
+    /// Returns the one address that the setters answer to.
     fn controller(env: Env) -> Address;
-}
-
-/// What `zakat_pool` needs from `attestation`.
-#[contractclient(name = "AttestationClient")]
-pub trait AttestationInterface {
-    /// The approval account: a Stellar account whose signers and threshold
-    /// decide whether a payout is approved.
-    fn authority(env: Env) -> Address;
 }

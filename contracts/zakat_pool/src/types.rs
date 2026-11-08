@@ -1,25 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use cipherphi_interface::{Allocation, Category, Parameters};
-use soroban_sdk::{contracterror, contractevent, contracttype, Address, BytesN, Vec};
+use soroban_sdk::{contracterror, contractevent, contracttype, Address, Vec};
 
-/// Configuration is instance storage, sharing the contract's lifetime. Only the
-/// per-asset balances are keyed separately. Nothing here is temporary storage,
-/// where a queued change could vanish mid-timelock.
+/// The storage keys that the pool uses.
+///
+/// Configuration is held in instance storage, which shares the contract's
+/// lifetime, and only the per-asset balances are keyed separately. Nothing can be
+/// held in temporary storage. This avoids temporary storage to stop a queued
+/// change from vanishing mid-timelock.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     Governance,
-    Distributor,
+    /// The approval multisig that authorises each payout.
+    Authority,
     PolicyAddr,
-    AttestAddr,
     ApprovedAssets,
-    DistributionSeq,
     Paused,
-    DistributorDisabled,
     TimelockLedgers,
     PendingChange,
-    /// Persistent: the 8 buckets of one approved asset.
+    /// The persistent entry that holds the 8 buckets of one approved asset.
     CategoryBalances(Address),
 }
 
@@ -28,87 +29,85 @@ pub enum DataKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Change {
     SetPolicy(Address),
-    SetAttestation(Address),
+    /// A replacement for the approval multisig, used when its keys are lost.
+    SetAuthority(Address),
     ApproveAsset(Address),
     SetAllocation(Allocation),
     SetParameters(Parameters),
-    /// Replace the distributor and lift a disable.
-    SetDistributor(Address),
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingChange {
     pub change: Change,
-    /// The change may execute in any ledger after this one.
+    /// The ledger after which the change may execute.
     pub execute_after: u32,
 }
 
-/// One variant per refusal, so a failed transaction says which door was wrong.
-/// Numbers carried over from the demo keep their meaning.
+/// The refusals that the pool returns, one variant per refusal.
+///
+/// A retired number cannot be reused, and the pool's numbers stay below
+/// `policy`'s, which start at 30. This keeps every number stable to let a failed
+/// transaction name its refusal without ambiguity.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    /// Non-positive contribution or payout amount.
+    /// The amount is not positive.
     InvalidAmount = 2,
-    /// `policy` returned something other than 8 non-negative amounts summing
-    /// exactly to the amount received.
+    /// The allocation does not hold exactly 8 non-negative amounts summing to the
+    /// amount received.
     InvalidAllocation = 3,
-    /// Checked arithmetic said no.
+    /// The arithmetic overflows.
     Overflow = 4,
-    /// The arguments disagree with the attestation.
-    AttestationMismatch = 5,
-    /// The attestation names a different deployment.
-    WrongPool = 6,
-    /// The attestation was signed for a different network.
-    WrongNetwork = 7,
-    /// The attestation names a different asset from the one being paid.
-    WrongAsset = 8,
-    /// `expiry_ledger` is at or behind the current ledger.
-    Expired = 9,
-    /// Replay, or a sequence from the future.
-    SequenceMismatch = 10,
-    // 11 and 12 were `UnknownSigner` and `ThresholdNotMet`, from when this
-    // contract counted signatures itself. The approval account's own threshold
-    // now refuses a short quorum, before the contract runs. Retired, not reused.
+    // Numbers 5 to 10 cannot be reused: they were the attestation binding errors
+    // (`AttestationMismatch`, `WrongPool`, `WrongNetwork`, `WrongAsset`, `Expired`,
+    // `SequenceMismatch`). These bindings can only be enforced by Stellar now, at
+    // `require_auth`.
+    // Numbers 11 and 12 cannot be reused: they were `UnknownSigner` and
+    // `ThresholdNotMet`, from when this contract counted signatures itself.
     /// The category bucket does not hold the amount.
     InsufficientBucket = 13,
     /// The buckets claim more than the pool holds.
     Insolvent = 14,
-    /// The payout recipient is the pool itself.
+    /// The caller is neither governance nor the approval multisig. Number 15 was
+    /// never assigned before.
+    Unauthorised = 15,
+    /// The recipient is the pool itself.
     SelfDistribution = 16,
     /// The asset is not in `approved_assets`.
     AssetNotApproved = 17,
-    /// Contributions are paused.
+    /// The pool is paused for contributions.
     ContributionsPaused = 18,
-    /// The distributor is disabled.
-    DistributorDisabled = 19,
-    /// The constructor was given a delay under 7 days.
+    // Number 19 cannot be reused: it was `DistributorDisabled`, and there is no
+    // distributor.
+    /// The delay is under 120,960 ledgers.
     TimelockTooShort = 20,
-    /// One change is already queued.
+    /// The queue already holds a change.
     ChangeAlreadyPending = 21,
-    /// No change is queued.
+    /// The queue holds no change.
     NoPendingChange = 22,
     /// The ledger has not passed the change's `execute_after`.
     TimelockNotElapsed = 23,
-    /// `attestation` did not answer with an address.
-    AttestationRejected = 24,
-    /// The token moved a different amount from the one asked for.
+    // Number 24 cannot be reused: it was `AttestationRejected`, and there is no
+    // attestation contract.
+    /// The token moves a different amount from the one requested.
     TransferShortfall = 25,
     /// The asset is already approved.
     AssetAlreadyApproved = 26,
-    /// `policy` refused a queued value.
+    /// The `policy` contract refuses the queued value.
     PolicyRefused = 27,
-    /// Two of governance, the distributor and the approval account would be
-    /// the same address.
+    /// The governance and approval accounts are the same address.
     RolesOverlap = 28,
-    /// The `policy` being pointed to does not name this pool as its controller.
+    /// The `policy` contract does not name this pool as its controller.
     PolicyControllerMismatch = 29,
 }
 
-/// Emitted by `contribute`. Carries the whole split, 8 amounts in [`Category`]
-/// order, so a reader with only the event stream can rebuild every balance.
+/// The event that `contribute` emits, with the whole split in [`Category`]
+/// order.
+///
+/// This carries all 8 amounts to let a reader with only the event stream rebuild
+/// every balance.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Contribution {
@@ -120,8 +119,11 @@ pub struct Contribution {
     pub split: Vec<i128>,
 }
 
-/// Emitted by `distribute`. `attestation_hash` is the SHA-256 of the XDR the
-/// authority keys signed.
+/// The event that `distribute` emits.
+///
+/// The signed approval can only be found in the transaction that carries this
+/// event. This leaves the approval out of the event to keep a single copy of
+/// exactly what the signers approved.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Disbursement {
@@ -131,8 +133,6 @@ pub struct Disbursement {
     pub category: Category,
     pub asset: Address,
     pub amount: i128,
-    pub sequence: u64,
-    pub attestation_hash: BytesN<32>,
 }
 
 #[contractevent]
@@ -154,6 +154,8 @@ pub struct ChangeExecuted {
 pub struct ChangeCancelled {
     pub change: Change,
     pub execute_after: u32,
+    /// The role that cancelled the change: governance or the approval multisig.
+    pub by: Address,
 }
 
 #[contractevent]
@@ -163,7 +165,3 @@ pub struct ContributionsPaused {}
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContributionsResumed {}
-
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DistributorDisabled {}

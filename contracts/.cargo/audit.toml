@@ -1,9 +1,11 @@
-# Read by `cargo audit`. Each exception says why it does not reach a deployed
-# contract, and goes when an SDK release drops the dependency.
+# A list of advisory exceptions that `cargo audit` reads.
+# Each exception must be explained by why it does not reach a deployed contract, and must
+# be removed when an SDK release drops the dependency.
 [advisories]
 ignore = [
-  # crypto-bigint timing variability. It arrives only through soroban-env-host,
-  # the native host the SDK's test utilities run on. It is not in the wasm32v1-none
-  # dependency graph of any contract, and the tests handle no real secret.
+  # An advisory for crypto-bigint timing variability.
+  # It can only be pulled in via soroban-env-host, the native host that the SDK's test
+  # utilities run on. It cannot be found in the wasm32v1-none dependency graph of any
+  # contract, and the tests handle no real secret.
   "RUSTSEC-2026-0387",
 ]

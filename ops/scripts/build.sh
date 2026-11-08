@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Build all three contracts the SEP-58 way: from the source archive, in the
-# digest-pinned image, with the build environment recorded into each Wasm.
+# Builds both contracts the SEP-58 way, from the source archive in the digest-pinned image,
+# with the build environment recorded into each Wasm.
 # Writes ops/out/ and ops/out/hashes.json.
 
 . "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
@@ -11,7 +11,7 @@ SOURCE_SHA256="$(sha256_of "$OPS_DIR/$SOURCE_ARCHIVE")"
 
 BUILD_ROOT="$OPS_DIR/.build"
 SOURCE_DIR="$BUILD_ROOT/$SOURCE_PREFIX"
-rm -rf "$SOURCE_DIR/interface" "$SOURCE_DIR/zakat_pool" "$SOURCE_DIR/policy" "$SOURCE_DIR/attestation"
+rm -rf "$SOURCE_DIR/interface" "$SOURCE_DIR/zakat_pool" "$SOURCE_DIR/policy"
 mkdir -p "$BUILD_ROOT"
 run_pinned --entrypoint tar "$BLDIMG" \
   --extract --file "/work/ops/$SOURCE_ARCHIVE" --directory /work/ops/.build
@@ -25,8 +25,8 @@ echo "bldopt:        ${BLDOPT[*]}"
 echo "source_sha256: $SOURCE_SHA256"
 echo
 
-# Meta order is fixed here, because the meta lands inside the Wasm and is itself
-# part of what is hashed.
+# The meta flags that land inside the Wasm and are themselves part of what is hashed.
+# This fixes their order here to keep the hash the same on every build.
 META=(--meta "bldimg=$BLDIMG")
 for opt in "${BLDOPT[@]}"; do
   META+=(--meta "bldopt=$opt")

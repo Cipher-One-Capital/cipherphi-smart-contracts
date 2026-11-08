@@ -1,25 +1,25 @@
 # Reproducible build
 
-Builds `zakat_pool`, `policy` and `attestation` from this repository's source, in a digest-pinned container, so anyone can check that a deployed contract runs exactly this code. Testnet only, unaudited, no real funds.
+Builds `zakat_pool` and `policy` from this repository's source in a digest-pinned container. This builds from source in a pinned container to let anyone check that a deployed contract runs exactly this code. The contracts can only be used on testnet, are unaudited, and cannot be used with real funds.
 
 ```bash
-bash ops/scripts/build.sh                # writes ops/out/*.wasm and ops/out/hashes.json
-node ops/scripts/check-no-upgrade.mjs    # reads the Wasm: zakat_pool has no way to replace its code
+bash ops/scripts/build.sh                # Writes ops/out/*.wasm and ops/out/hashes.json
+node ops/scripts/check-no-upgrade.mjs    # Checks the Wasm to confirm that zakat_pool cannot replace its code
 ```
 
-The image is pinned by digest in `build.conf`, and each Wasm records SEP-58 metadata. All three Wasm files record the same `source_sha256`, because one archive holds the whole workspace. The archive is rebuilt from git rather than committed, and it leaves out the fuzz crate.
+The image is pinned by digest in `build.conf`, and SEP-58 metadata is recorded in each Wasm. This packs the whole workspace into one archive to give both Wasm files the same `source_sha256`. The archive is not committed and can only be rebuilt from git, and the fuzz crate is left out of it.
 
-To check a deployed contract, fetch its Wasm from the network and compare its hash with the matching one in `ops/out/hashes.json`:
+A deployed contract can be checked by fetching its Wasm from the network and comparing its hash with the matching one in `ops/out/hashes.json`:
 
 ```bash
 stellar contract fetch --id <contract id> --network testnet --out-file deployed.wasm
 shasum -a 256 deployed.wasm
 ```
 
-Fuzz targets are in `contracts/fuzz`, and CI runs them on Linux:
+The fuzz targets that CI runs on Linux are in `contracts/fuzz`:
 
 ```bash
 cd contracts/fuzz && cargo +nightly fuzz run --sanitizer none contribute
 ```
 
-They do not link on macOS, because of the contracts' `cdylib` crate type. Run them in a Linux container there.
+The fuzz targets cannot be linked on macOS because of the contracts' `cdylib` crate type, and can only be run there in a Linux container.
