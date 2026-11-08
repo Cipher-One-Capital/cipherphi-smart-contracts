@@ -73,7 +73,7 @@ fuzz_target!(|input: Input| {
         };
         let approval = payout
             .approved
-            .then(|| (recipient, asset, amount, signed_category));
+            .then_some((recipient, asset, amount, signed_category));
 
         let result = h.try_distribute(to, category, payout.amount, approval);
 
