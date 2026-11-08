@@ -23,7 +23,10 @@ mod test;
 
 pub use cipherphi_interface::{Allocation, Category, DischargeTiming, NisabBasis, Parameters};
 use cipherphi_interface::{BPS_TOTAL, CATEGORY_COUNT};
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal,
+    TryFromVal, Val, Vec,
+};
 
 /// The widest administrators' share that any setting can allow.
 ///
@@ -64,6 +67,8 @@ pub enum Error {
     /// The remainder category is the administrators. This refuses it to stop the
     /// rounding remainder from carrying their credit past the amil cap.
     RemainderToAdministrators = 36,
+    /// The configuration entry is missing.
+    Unconfigured = 37,
 }
 
 #[contract]
@@ -137,16 +142,31 @@ impl Policy {
     }
 
     pub fn controller(env: Env) -> Address {
-        env.storage().instance().get(&DataKey::Controller).unwrap()
+        config(&env, &DataKey::Controller)
     }
 
     pub fn allocation(env: Env) -> Allocation {
-        env.storage().instance().get(&DataKey::Allocation).unwrap()
+        config(&env, &DataKey::Allocation)
     }
 
     pub fn parameters(env: Env) -> Parameters {
-        env.storage().instance().get(&DataKey::Parameters).unwrap()
+        config(&env, &DataKey::Parameters)
     }
+}
+
+/// Reads a configuration entry that the constructor set.
+///
+/// A missing entry can only be reported as the typed `Unconfigured` error, never as
+/// a bare panic. This names the failure to keep every refusal readable from the
+/// transaction result.
+fn config<V>(env: &Env, key: &DataKey) -> V
+where
+    V: IntoVal<Env, Val> + TryFromVal<Env, Val>,
+{
+    env.storage()
+        .instance()
+        .get(key)
+        .unwrap_or_else(|| panic_with_error!(env, Error::Unconfigured))
 }
 
 /// Rejects an allocation and parameter pair that breaks any bound.

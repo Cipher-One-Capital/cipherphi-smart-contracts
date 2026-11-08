@@ -44,7 +44,9 @@ pub use cipherphi_interface::Category;
 pub use types::*;
 
 use cipherphi_interface::{PolicyClient, CATEGORY_COUNT};
-use soroban_sdk::{contract, contractimpl, token, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contractimpl, panic_with_error, token, Address, Env, IntoVal, TryFromVal, Val, Vec,
+};
 
 /// The minimum delay, in ledgers, that a constructor can set: 7 days at the
 /// 5-second ledger close Stellar targets.
@@ -139,17 +141,20 @@ impl ZakatPool {
         }
 
         let split = allocation(&env, amount)?;
-        let mut buckets = Self::balances(env.clone(), asset.clone());
-        for index in 0..CATEGORY_COUNT {
-            let credited = buckets
-                .get_unchecked(index)
-                .checked_add(split.get_unchecked(index))
-                .ok_or(Error::Overflow)?;
-            buckets.set(index, credited);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::CategoryBalances(asset.clone()), &buckets);
+        let buckets = env.storage().persistent().try_update(
+            &DataKey::CategoryBalances(asset.clone()),
+            |stored: Option<Vec<i128>>| {
+                let mut buckets = stored.unwrap_or_else(|| empty_buckets(&env));
+                for index in 0..CATEGORY_COUNT {
+                    let credited = buckets
+                        .get_unchecked(index)
+                        .checked_add(split.get_unchecked(index))
+                        .ok_or(Error::Overflow)?;
+                    buckets.set(index, credited);
+                }
+                Ok(buckets)
+            },
+        )?;
 
         assert_solvent(&env, &asset, &buckets)?;
 
@@ -200,19 +205,20 @@ impl ZakatPool {
             return Err(Error::SelfDistribution);
         }
 
-        // 4. The bucket holds the amount.
+        // 4. The bucket holds the amount. 5. Decrement, then transfer.
         let index = category as u32;
-        let mut buckets = Self::balances(env.clone(), asset.clone());
-        let balance = buckets.get_unchecked(index);
-        if balance < amount {
-            return Err(Error::InsufficientBucket);
-        }
-
-        // 5. Decrement, then transfer.
-        buckets.set(index, balance.checked_sub(amount).ok_or(Error::Overflow)?);
-        env.storage()
-            .persistent()
-            .set(&DataKey::CategoryBalances(asset.clone()), &buckets);
+        let buckets = env.storage().persistent().try_update(
+            &DataKey::CategoryBalances(asset.clone()),
+            |stored: Option<Vec<i128>>| {
+                let mut buckets = stored.unwrap_or_else(|| empty_buckets(&env));
+                let balance = buckets.get_unchecked(index);
+                if balance < amount {
+                    return Err(Error::InsufficientBucket);
+                }
+                buckets.set(index, balance.checked_sub(amount).ok_or(Error::Overflow)?);
+                Ok(buckets)
+            },
+        )?;
 
         let token = token::Client::new(&env, &asset);
         let held_before = token.balance(&pool);
@@ -332,12 +338,14 @@ impl ZakatPool {
                 storage.set(&DataKey::Authority, &address);
             }
             Change::ApproveAsset(asset) => {
-                let mut assets = Self::approved_assets(env.clone());
-                if assets.contains(&asset) {
-                    return Err(Error::AssetAlreadyApproved);
-                }
-                assets.push_back(asset.clone());
-                storage.set(&DataKey::ApprovedAssets, &assets);
+                storage.try_update(&DataKey::ApprovedAssets, |stored: Option<Vec<Address>>| {
+                    let mut assets = stored.unwrap_or_else(|| Vec::new(&env));
+                    if assets.contains(&asset) {
+                        return Err(Error::AssetAlreadyApproved);
+                    }
+                    assets.push_back(asset.clone());
+                    Ok(assets)
+                })?;
                 env.storage()
                     .persistent()
                     .set(&DataKey::CategoryBalances(asset), &empty_buckets(&env));
@@ -410,10 +418,7 @@ impl ZakatPool {
     }
 
     pub fn approved_assets(env: Env) -> Vec<Address> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ApprovedAssets)
-            .unwrap()
+        config(&env, &DataKey::ApprovedAssets)
     }
 
     pub fn is_approved_recipient(env: Env, recipient: Address) -> bool {
@@ -423,16 +428,16 @@ impl ZakatPool {
     }
 
     pub fn governance(env: Env) -> Address {
-        env.storage().instance().get(&DataKey::Governance).unwrap()
+        config(&env, &DataKey::Governance)
     }
 
     /// Returns the approval multisig.
     pub fn authority(env: Env) -> Address {
-        env.storage().instance().get(&DataKey::Authority).unwrap()
+        config(&env, &DataKey::Authority)
     }
 
     pub fn policy(env: Env) -> Address {
-        env.storage().instance().get(&DataKey::PolicyAddr).unwrap()
+        config(&env, &DataKey::PolicyAddr)
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -440,15 +445,27 @@ impl ZakatPool {
     }
 
     pub fn timelock_ledgers(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::TimelockLedgers)
-            .unwrap()
+        config(&env, &DataKey::TimelockLedgers)
     }
 
     pub fn pending_change(env: Env) -> Option<PendingChange> {
         env.storage().instance().get(&DataKey::PendingChange)
     }
+}
+
+/// Reads a configuration entry that the constructor set.
+///
+/// A missing entry can only be reported as the typed `Unconfigured` error, never as
+/// a bare panic. This names the failure to keep every refusal readable from the
+/// transaction result.
+fn config<V>(env: &Env, key: &DataKey) -> V
+where
+    V: IntoVal<Env, Val> + TryFromVal<Env, Val>,
+{
+    env.storage()
+        .instance()
+        .get(key)
+        .unwrap_or_else(|| panic_with_error!(env, Error::Unconfigured))
 }
 
 fn flag(env: &Env, key: &DataKey) -> bool {

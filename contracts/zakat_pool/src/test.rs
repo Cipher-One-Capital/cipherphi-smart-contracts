@@ -879,6 +879,70 @@ fn outsider_cannot(f: &Fixture, fn_name: &str, args: Vec<soroban_sdk::Val>, call
     f.env.mock_all_auths();
 }
 
+/// Asserts that `who` alone authorised the most recent call to the pool, and that
+/// the call was `fn_name` with exactly `args`.
+///
+/// A role cannot be proven by `mock_all_auths` alone. This reads the recorded
+/// authorisation to catch an entry point that checks the wrong role.
+fn assert_authorised_by(f: &Fixture, who: &Address, fn_name: &str, args: Vec<soroban_sdk::Val>) {
+    let auths = f.env.auths();
+    assert_eq!(auths.len(), 1, "wanted one authorisation for {fn_name}");
+    let (signer, invocation) = auths[0].clone();
+    assert_eq!(&signer, who, "{fn_name} was authorised by the wrong role");
+    assert_eq!(
+        invocation.function,
+        AuthorizedFunction::Contract((f.pool.clone(), Symbol::new(&f.env, fn_name), args))
+    );
+}
+
+#[test]
+fn pause_and_resume_are_authorised_by_governance() {
+    let f = setup();
+    f.client().pause_contributions();
+    assert_authorised_by(&f, &f.governance, "pause_contributions", Vec::new(&f.env));
+    f.client().resume_contributions();
+    assert_authorised_by(&f, &f.governance, "resume_contributions", Vec::new(&f.env));
+}
+
+#[test]
+fn propose_and_execute_are_authorised_by_governance() {
+    let f = setup();
+    let change = Change::ApproveRecipient(Address::generate(&f.env));
+    let execute_after = f.client().propose_change(&change);
+    assert_authorised_by(
+        &f,
+        &f.governance,
+        "propose_change",
+        (change.clone(),).into_val(&f.env),
+    );
+    f.past_timelock(execute_after);
+    f.client().execute_change();
+    assert_authorised_by(&f, &f.governance, "execute_change", Vec::new(&f.env));
+}
+
+#[test]
+fn a_cancel_is_authorised_by_the_role_that_makes_it() {
+    let f = setup();
+    for role in [f.governance.clone(), f.authority.clone()] {
+        let change = Change::SetAllocation(next_allocation(&f));
+        f.client().propose_change(&change);
+        f.client().cancel_change(&role);
+        assert_authorised_by(&f, &role, "cancel_change", (role.clone(),).into_val(&f.env));
+    }
+}
+
+#[test]
+fn an_instant_removal_is_authorised_by_the_approval_multisig() {
+    let f = setup();
+    f.client().remove_recipient(&f.authority, &f.recipient);
+    assert_authorised_by(
+        &f,
+        &f.authority,
+        "remove_recipient",
+        (f.authority.clone(), f.recipient.clone()).into_val(&f.env),
+    );
+}
+
 #[test]
 fn only_governance_can_pause_and_resume() {
     let f = setup();
