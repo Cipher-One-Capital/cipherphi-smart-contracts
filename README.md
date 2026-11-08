@@ -60,6 +60,10 @@ Planned but not committed:
 - [Muhammad Emamally](https://www.linkedin.com/in/phil-emamally-/), Shariah authority for the pilot.
 - [Ismail Amara](https://www.linkedin.com/in/ismail-a-667666111/), partnerships and pilot.
 
+## Code of Conduct
+
+Every contribution can only be made under the [Code of Conduct](./CODE_OF_CONDUCT.md), the Contributor Covenant 2.1.
+
 ## License
 
 The smart contracts in [`contracts/`](./contracts) and their reproducible build in [`ops/`](./ops) are licensed under Apache 2.0, see [`contracts/LICENSE`](./contracts/LICENSE). Nothing else in this repository can be reused under a licence.
