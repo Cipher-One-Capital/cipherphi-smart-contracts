@@ -23,9 +23,18 @@ CipherPhi is composed of two Soroban contracts and two Foundation multisigs:
 
 > Read the full design: [ARCHITECTURE.md](./ARCHITECTURE.md).
 
-## Testnet demo
+## Testnet
 
-A clickable demo of give, split, release and check runs on Stellar testnet with Circle's testnet USDC: pool [`CD3DL4GTEFZMJUTZT4GXA5ZNPLFXNFYS4LHQQYU2ZKJ3DJJOJO6XISGU`](https://stellar.expert/explorer/testnet/contract/CD3DL4GTEFZMJUTZT4GXA5ZNPLFXNFYS4LHQQYU2ZKJ3DJJOJO6XISGU), Wasm hash `f498a9c5d440ddeee3da70f37b14f95044647b586a01c816a98c24d084072677`. It runs the revision 3 design, is unaudited and handles no real funds.
+The revision 5 contracts run on Stellar testnet with Circle's testnet USDC, built reproducibly from this repository and checked against the network. They are unaudited, handle no real funds, and every key is a test key.
+
+| Contract | Address | Wasm hash |
+| --- | --- | --- |
+| `zakat_pool` | [`CBMPFDAAAYURRIMTZN76IGNLSP2JPKTPPCBXUBD7TXKFYVI2FYYF6BAW`](https://stellar.expert/explorer/testnet/contract/CBMPFDAAAYURRIMTZN76IGNLSP2JPKTPPCBXUBD7TXKFYVI2FYYF6BAW) | `100459f23aaa84435dd1c94a2c67055669021cc21a73bafb2e11d9ff16ce9786` |
+| `policy` | [`CBXBPITVYR5M6QPZAHV6QCAJO2LCS547K3OVBTVJVD6Z742OUHFTSKCU`](https://stellar.expert/explorer/testnet/contract/CBXBPITVYR5M6QPZAHV6QCAJO2LCS547K3OVBTVJVD6Z742OUHFTSKCU) | `9ba5e7602e314a60b881ded49795ee342593a4cc234fe6c9680868f5cacc3f92` |
+
+Governance [`GCL2VC…PLXX`](https://stellar.expert/explorer/testnet/account/GCL2VCSOWEF6XUCBCD6TQ5URQAE3R4NAGRPEBZ7VGKPGMMQI6VM3PLXX) and the approval multisig [`GCP4SH…2BMV`](https://stellar.expert/explorer/testnet/account/GCP4SHHS7A2JA4KH6S4V3UTEDI263Z34RHSF6TE63DUAMTVN2XYG2BMV) are 2-of-3 accounts with the master key at weight 0. The pool's one approved recipient is the test partner [`GD6O4N…3NQR`](https://stellar.expert/explorer/testnet/account/GD6O4NBIFK2PVUM2CMJIPYX5PWBM74GXF4ASXYLAQRO4C7IA5WJI3NQR). The `policy` split and parameters are placeholders, not validated by the Shariah authority.
+
+A clickable demo of give, split, release and check still runs the revision 3 design on its own pool, [`CD3DL4GTEFZMJUTZT4GXA5ZNPLFXNFYS4LHQQYU2ZKJ3DJJOJO6XISGU`](https://stellar.expert/explorer/testnet/contract/CD3DL4GTEFZMJUTZT4GXA5ZNPLFXNFYS4LHQQYU2ZKJ3DJJOJO6XISGU), Wasm hash `f498a9c5d440ddeee3da70f37b14f95044647b586a01c816a98c24d084072677`. It has no allow-list.
 
 ## Revisions
 
