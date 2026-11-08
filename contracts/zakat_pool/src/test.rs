@@ -115,7 +115,14 @@ fn setup_paused() -> Fixture {
     env.register_at(
         &pool,
         ZakatPool,
-        ZakatPoolArgs::__constructor(&governance, &authority, &policy, &asset, &TIMELOCK),
+        ZakatPoolArgs::__constructor(
+            &governance,
+            &authority,
+            &policy,
+            &asset,
+            &vec![&env, recipient.clone()],
+            &TIMELOCK,
+        ),
     );
 
     Fixture {
@@ -241,6 +248,7 @@ fn constructor_stores_the_configuration() {
     assert_eq!(pool.timelock_ledgers(), TIMELOCK);
     assert!(pool.is_paused());
     assert_eq!(pool.pending_change(), None);
+    assert!(pool.is_approved_recipient(&f.recipient));
     assert_eq!(
         pool.balances(&f.asset),
         vec![&f.env, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -279,7 +287,14 @@ fn refuse_construction(
     let message = refusal_of(|| {
         env.register(
             ZakatPool,
-            ZakatPoolArgs::__constructor(governance, authority, &policy, &asset, &timelock),
+            ZakatPoolArgs::__constructor(
+                governance,
+                authority,
+                &policy,
+                &asset,
+                &Vec::new(env),
+                &timelock,
+            ),
         );
     });
     assert_refused(&message, want as u32);
@@ -332,7 +347,14 @@ fn a_policy_answering_to_someone_else_is_refused_at_construction() {
     let message = refusal_of(|| {
         env.register(
             ZakatPool,
-            ZakatPoolArgs::__constructor(&governance, &authority, &policy, &asset, &TIMELOCK),
+            ZakatPoolArgs::__constructor(
+                &governance,
+                &authority,
+                &policy,
+                &asset,
+                &Vec::<Address>::new(&env),
+                &TIMELOCK,
+            ),
         );
     });
     assert_refused(&message, Error::PolicyControllerMismatch as u32);
@@ -356,6 +378,7 @@ fn the_constructor_requires_governance_to_authorise() {
                 f.authority.clone(),
                 f.policy.clone(),
                 f.asset.clone(),
+                vec![&f.env, f.recipient.clone()],
                 TIMELOCK,
             )
                 .into_val(&f.env),
@@ -726,6 +749,8 @@ fn zero_and_negative_payouts_are_refused() {
 
 #[test]
 fn a_payout_to_the_pool_itself_is_refused() {
+    // The pool cannot be approved as a recipient, so the allow-list refuses it
+    // before `SelfDistribution` is reached.
     let f = setup();
     f.give();
     f.refuse(
@@ -733,7 +758,7 @@ fn a_payout_to_the_pool_itself_is_refused() {
         &f.asset,
         10,
         Category::Poor,
-        Error::SelfDistribution,
+        Error::RecipientNotApproved,
     );
 }
 
@@ -1419,4 +1444,362 @@ fn each_assets_solvency_stands_alone() {
     let submitted = (f.recipient.clone(), second.clone(), 100, Category::Poor);
     assert!(!f.submit_with_approval(&f.authority, submitted, f.payout(100)));
     assert_eq!(token::Client::new(&f.env, &second).balance(&f.recipient), 0);
+}
+
+// --- the recipient allow-list --------------------------------------------------
+
+impl Fixture {
+    /// Submits a payout to `recipient` when the approval multisig authorised exactly
+    /// it, and asserts the error and an unmoved pool when a refusal test expects
+    /// `want`.
+    fn refuse_approved(&self, recipient: &Address, want: Error) {
+        let before = self.state();
+        let paid_before = self.token().balance(recipient);
+        self.env.mock_auths(&[MockAuth {
+            address: &self.authority,
+            invoke: &MockAuthInvoke {
+                contract: &self.pool,
+                fn_name: "distribute",
+                args: (
+                    recipient.clone(),
+                    self.asset.clone(),
+                    10i128,
+                    Category::Poor,
+                )
+                    .into_val(&self.env),
+                sub_invokes: &[],
+            },
+        }]);
+        let result = self
+            .client()
+            .try_distribute(recipient, &self.asset, &10, &Category::Poor);
+        self.env.mock_all_auths();
+        assert_eq!(result, Err(Ok(want)));
+        assert_eq!(self.state(), before, "a refused payout moved the pool");
+        assert_eq!(self.token().balance(recipient), paid_before);
+    }
+
+    /// Queues `change`, waits out the delay and returns the result of executing it.
+    fn queue_and_execute(&self, change: &Change) -> Result<(), Error> {
+        let execute_after = self.client().propose_change(change);
+        self.past_timelock(execute_after);
+        match self.client().try_execute_change() {
+            Ok(_) => Ok(()),
+            Err(Ok(error)) => Err(error),
+            Err(Err(error)) => panic!("execute_change failed in the host: {error:?}"),
+        }
+    }
+}
+
+/// The addresses that a pool is deployed with, settled before registration.
+struct Roles {
+    pool: Address,
+    governance: Address,
+    authority: Address,
+    policy: Address,
+    asset: Address,
+}
+
+fn roles(env: &Env) -> Roles {
+    let pool = Address::generate(env);
+    let policy = env.register(
+        Policy,
+        PolicyArgs::__constructor(&pool, &allocation(env, &PLACEHOLDER), &parameters()),
+    );
+    Roles {
+        pool,
+        governance: Address::generate(env),
+        authority: Address::generate(env),
+        policy,
+        asset: env
+            .register_stellar_asset_contract_v2(Address::generate(env))
+            .address(),
+    }
+}
+
+/// Deploys a pool at `roles.pool` that approves `recipients` at construction.
+fn deploy(env: &Env, roles: &Roles, recipients: &Vec<Address>) {
+    env.register_at(
+        &roles.pool,
+        ZakatPool,
+        ZakatPoolArgs::__constructor(
+            &roles.governance,
+            &roles.authority,
+            &roles.policy,
+            &roles.asset,
+            recipients,
+            &TIMELOCK,
+        ),
+    );
+}
+
+#[test]
+fn a_payout_to_an_unapproved_recipient_fails_even_with_a_valid_approval() {
+    let f = setup();
+    f.give();
+    let stranger = Address::generate(&f.env);
+    f.refuse_approved(&stranger, Error::RecipientNotApproved);
+}
+
+#[test]
+fn a_recipient_passed_to_the_constructor_can_be_paid_at_once() {
+    let f = setup();
+    assert!(f.client().is_approved_recipient(&f.recipient));
+    f.give();
+    assert_eq!(f.env.ledger().sequence(), START_LEDGER);
+    assert!(f.submit_with_approval(&f.authority, f.payout(10), f.payout(10)));
+    assert_eq!(f.token().balance(&f.recipient), 10);
+}
+
+#[test]
+fn an_empty_list_of_recipients_is_accepted_and_approves_no_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let r = roles(&env);
+    deploy(&env, &r, &Vec::new(&env));
+    assert_eq!(
+        env.events().all().filter_by_contract(&r.pool),
+        std::vec::Vec::<soroban_sdk::xdr::ContractEvent>::new()
+    );
+    let pool = ZakatPoolClient::new(&env, &r.pool);
+    assert!(!pool.is_approved_recipient(&Address::generate(&env)));
+}
+
+#[test]
+fn the_constructor_emits_one_approval_event_per_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let r = roles(&env);
+    let (first, second) = (Address::generate(&env), Address::generate(&env));
+    deploy(&env, &r, &vec![&env, first.clone(), second.clone()]);
+    assert_eq!(
+        env.events().all().filter_by_contract(&r.pool),
+        std::vec![
+            RecipientApproved {
+                recipient: first.clone()
+            }
+            .to_xdr(&env, &r.pool),
+            RecipientApproved {
+                recipient: second.clone()
+            }
+            .to_xdr(&env, &r.pool),
+        ]
+    );
+    let pool = ZakatPoolClient::new(&env, &r.pool);
+    assert!(pool.is_approved_recipient(&first));
+    assert!(pool.is_approved_recipient(&second));
+}
+
+/// A function that picks one of the deployment addresses.
+type Pick = fn(&Roles) -> Address;
+
+#[test]
+fn the_constructor_refuses_the_pool_the_roles_and_duplicates_as_recipients() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let repeated = Address::generate(&env);
+    let cases: [(Pick, Error); 3] = [
+        (|r| r.pool.clone(), Error::SelfDistribution),
+        (|r| r.governance.clone(), Error::RecipientIsRole),
+        (|r| r.authority.clone(), Error::RecipientIsRole),
+    ];
+    for (pick, want) in cases {
+        let r = roles(&env);
+        let message = refusal_of(|| deploy(&env, &r, &vec![&env, pick(&r)]));
+        assert_refused(&message, want as u32);
+    }
+    let r = roles(&env);
+    let message = refusal_of(|| deploy(&env, &r, &vec![&env, repeated.clone(), repeated]));
+    assert_refused(&message, Error::RecipientAlreadyApproved as u32);
+}
+
+#[test]
+fn approving_a_recipient_takes_effect_only_after_the_timelock() {
+    let f = setup();
+    f.give();
+    let partner = Address::generate(&f.env);
+    let change = Change::ApproveRecipient(partner.clone());
+    let execute_after = f.client().propose_change(&change);
+
+    f.env.ledger().set_sequence_number(execute_after);
+    assert_eq!(
+        f.client().try_execute_change(),
+        Err(Ok(Error::TimelockNotElapsed))
+    );
+    assert!(!f.client().is_approved_recipient(&partner));
+    f.refuse_approved(&partner, Error::RecipientNotApproved);
+
+    f.past_timelock(execute_after);
+    f.client().execute_change();
+    assert_eq!(
+        f.env.events().all().filter_by_contract(&f.pool),
+        std::vec![
+            RecipientApproved {
+                recipient: partner.clone()
+            }
+            .to_xdr(&f.env, &f.pool),
+            ChangeExecuted {
+                change,
+                execute_after,
+            }
+            .to_xdr(&f.env, &f.pool),
+        ]
+    );
+    assert!(f.client().is_approved_recipient(&partner));
+    let payout = (partner.clone(), f.asset.clone(), 10, Category::Poor);
+    assert!(f.submit_with_approval(&f.authority, payout.clone(), payout));
+    assert_eq!(f.token().balance(&partner), 10);
+}
+
+#[test]
+fn either_role_can_cancel_an_approval_of_a_recipient() {
+    for by_authority in [false, true] {
+        let f = setup();
+        let partner = Address::generate(&f.env);
+        let execute_after = f
+            .client()
+            .propose_change(&Change::ApproveRecipient(partner.clone()));
+        let canceller = if by_authority {
+            f.authority.clone()
+        } else {
+            f.governance.clone()
+        };
+        f.client().cancel_change(&canceller);
+        f.past_timelock(execute_after);
+        assert_eq!(
+            f.client().try_execute_change(),
+            Err(Ok(Error::NoPendingChange))
+        );
+        assert!(!f.client().is_approved_recipient(&partner));
+    }
+}
+
+#[test]
+fn approving_the_pool_the_roles_or_an_approved_recipient_is_refused_and_stays_queued() {
+    let f = setup();
+    let cases = [
+        (f.pool.clone(), Error::SelfDistribution),
+        (f.governance.clone(), Error::RecipientIsRole),
+        (f.authority.clone(), Error::RecipientIsRole),
+        (f.recipient.clone(), Error::RecipientAlreadyApproved),
+    ];
+    for (address, want) in cases {
+        let change = Change::ApproveRecipient(address.clone());
+        assert_eq!(f.queue_and_execute(&change), Err(want));
+        assert_eq!(f.client().pending_change().map(|p| p.change), Some(change));
+        f.client().cancel_change(&f.governance);
+    }
+    assert!(!f.client().is_approved_recipient(&f.pool));
+    assert!(!f.client().is_approved_recipient(&f.governance));
+    assert!(!f.client().is_approved_recipient(&f.authority));
+}
+
+#[test]
+fn removing_a_recipient_through_the_timelock_blocks_the_next_payout() {
+    let f = setup();
+    f.give();
+    let change = Change::RemoveRecipient(f.recipient.clone());
+    let execute_after = f.client().propose_change(&change);
+    f.past_timelock(execute_after);
+    f.client().execute_change();
+    assert_eq!(
+        f.env.events().all().filter_by_contract(&f.pool),
+        std::vec![
+            RecipientRemoved {
+                recipient: f.recipient.clone(),
+                by: f.governance.clone(),
+            }
+            .to_xdr(&f.env, &f.pool),
+            ChangeExecuted {
+                change,
+                execute_after,
+            }
+            .to_xdr(&f.env, &f.pool),
+        ]
+    );
+    assert!(!f.client().is_approved_recipient(&f.recipient));
+    f.refuse_approved(&f.recipient, Error::RecipientNotApproved);
+}
+
+#[test]
+fn the_approval_multisig_removes_a_recipient_at_once() {
+    let f = setup();
+    f.give();
+    f.client().remove_recipient(&f.authority, &f.recipient);
+    let (who, _) = f.env.auths().first().cloned().unwrap();
+    assert_eq!(who, f.authority);
+    assert_eq!(
+        f.env.events().all().filter_by_contract(&f.pool),
+        std::vec![RecipientRemoved {
+            recipient: f.recipient.clone(),
+            by: f.authority.clone(),
+        }
+        .to_xdr(&f.env, &f.pool)]
+    );
+    assert!(!f.client().is_approved_recipient(&f.recipient));
+    f.refuse_approved(&f.recipient, Error::RecipientNotApproved);
+}
+
+#[test]
+fn an_approval_signed_before_a_removal_fails_after_it() {
+    let f = setup();
+    f.give();
+    // The signers approve a payout, then withdraw the recipient before it is
+    // submitted. The same approval is then presented unchanged.
+    let approved = f.payout(10);
+    f.client().remove_recipient(&f.authority, &f.recipient);
+    assert!(!f.submit_with_approval(&f.authority, approved.clone(), approved));
+    f.refuse_approved(&f.recipient, Error::RecipientNotApproved);
+}
+
+#[test]
+fn only_the_approval_multisig_can_remove_a_recipient_at_once() {
+    let f = setup();
+    let stranger = Address::generate(&f.env);
+    for caller in [f.governance.clone(), stranger] {
+        assert_eq!(
+            f.client().try_remove_recipient(&caller, &f.recipient),
+            Err(Ok(Error::Unauthorised))
+        );
+    }
+    // A removal cannot be made by naming the approval multisig. It can only be
+    // made via its authorisation.
+    outsider_cannot(
+        &f,
+        "remove_recipient",
+        (f.authority.clone(), f.recipient.clone()).into_val(&f.env),
+        || {
+            assert!(f
+                .client()
+                .try_remove_recipient(&f.authority, &f.recipient)
+                .is_err());
+        },
+    );
+    assert!(f.client().is_approved_recipient(&f.recipient));
+}
+
+#[test]
+fn removing_a_recipient_that_is_not_approved_is_refused() {
+    let f = setup();
+    let stranger = Address::generate(&f.env);
+    assert_eq!(
+        f.client().try_remove_recipient(&f.authority, &stranger),
+        Err(Ok(Error::RecipientNotApproved))
+    );
+    let change = Change::RemoveRecipient(stranger);
+    assert_eq!(
+        f.queue_and_execute(&change),
+        Err(Error::RecipientNotApproved)
+    );
+    assert_eq!(f.client().pending_change().map(|p| p.change), Some(change));
+}
+
+#[test]
+fn an_approved_recipient_cannot_become_the_approval_multisig() {
+    let f = setup();
+    assert_eq!(
+        f.queue_and_execute(&Change::SetAuthority(f.recipient.clone())),
+        Err(Error::RecipientIsRole)
+    );
+    assert_eq!(f.client().authority(), f.authority);
 }
