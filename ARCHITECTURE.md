@@ -48,7 +48,7 @@ The boundary is the line that keeps funds and rules on Stellar, and identity and
 
 *Only a signed transaction, a signed approval, and reads of events can cross the line.*
 
-## Contracts
+## Smart Contracts
 
 Custody and policy are separate deployments that exist from the first day, and payout approval is a separate account that the pool requires for each payout.
 
