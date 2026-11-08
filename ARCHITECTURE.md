@@ -14,6 +14,10 @@ The contract is the part that cannot be defended. It is a few thousand lines of 
 
 ## Stellar
 
+Stellar is the network that received a Sharia compliance certification on 17 July 2018, when the Shariyah Review Bureau, a Sharia advisory firm licensed by the Central Bank of Bahrain, certified Stellar for money transfer and asset tokenisation, including the use of lumens (XLM), and issued guidance for Islamic financial institutions using it.[^26] A zakat rail is one that sits in exactly that scope, since it receives a transfer, holds a tokenised asset and pays it out. This builds on a certified network to keep the first Shariah question a reviewer asks, whether the settlement layer itself is permissible, answered by a licensed third party rather than by us.
+
+The certificate is a ruling on the network, not on CipherPhi. The pool's split, its parameters and the stablecoins it holds are matters that it does not cover, and they can only be validated by our own Shariah authority (Shariah). This keeps the two apart to stop a certificate about Stellar being read as a claim about this project. The certificate's current standing is an item that can only be confirmed with the Bureau, and is confirmed before it is cited to a partner or a regulator.
+
 The 4 pillars below are features that already sit in the protocol rather than being built for this project.
 
 **USDC.** USDC is a stablecoin that Circle issues on Stellar directly, and CCTP is the protocol that moves it in from other chains by burn and mint rather than through a wrapped asset or a third-party bridge.[^4] Bridge counterparty risk cannot be carried by a pool holding donated zakat, and on Stellar it never has to be.
@@ -458,3 +462,4 @@ The indexer is a service that depends on one property in particular: the Stellar
 [^23]: Soroban Rust SDK, supported target and build guidance. [github.com/stellar/rs-soroban-sdk](https://github.com/stellar/rs-soroban-sdk)
 [^24]: CAP-71-02, address-bound Soroban address credentials. [github.com/stellar/stellar-protocol/blob/master/core/cap-0071-02.md](https://github.com/stellar/stellar-protocol/blob/master/core/cap-0071-02.md)
 [^25]: Standardised asset events under SEP-41. [developers.stellar.org/docs/tokens/anatomy-of-an-asset](https://developers.stellar.org/docs/tokens/anatomy-of-an-asset)
+[^26]: Stellar receives Sharia compliance certification for transfers and tokenization, Stellar Development Foundation, 17 July 2018. [stellar.org/blog/policy/stellar-receives-sharia-compliance-certification-transfers-tokenization](https://stellar.org/blog/policy/stellar-receives-sharia-compliance-certification-transfers-tokenization)
