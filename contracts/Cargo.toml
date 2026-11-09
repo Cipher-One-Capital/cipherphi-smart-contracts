@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["interface", "zakat_pool", "policy"]
+# A member exclusion that leaves out the fuzz crate, which needs nightly and libfuzzer.
+# This gives the fuzz crate its own lockfile and workspace to keep it out of the
+# reproducible build.
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[workspace.dependencies]
+soroban-sdk = "29.0.1"
+cipherphi_interface = { path = "interface" }
+policy = { path = "policy" }
+
+# The toolchain can only be pinned via the pinned build image (see ops/build.conf).
+# This leaves out a `rust-toolchain.toml` deliberately to keep the image as the toolchain pin.
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
