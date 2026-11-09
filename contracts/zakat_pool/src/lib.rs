@@ -55,6 +55,14 @@ use soroban_sdk::{
 /// shorter in wall-clock time.
 pub const MIN_TIMELOCK_LEDGERS: u32 = 120_960;
 
+/// The number of ledgers, after `execute_after`, during which a queued change can
+/// execute: 7 days at the 5-second ledger close.
+///
+/// A change that is not executed in this window can only be cancelled. This ends
+/// every change's life to keep an old approval from executing once nobody is
+/// watching for it.
+pub const CHANGE_WINDOW_LEDGERS: u32 = 120_960;
+
 #[contract]
 pub struct ZakatPool;
 
@@ -68,6 +76,9 @@ impl ZakatPool {
     ///
     /// An empty `recipients` can be accepted, and a recipient can only be accepted
     /// if it is not the pool, governance, the approval multisig or a duplicate.
+    ///
+    /// The approval multisig cannot be the pool or `policy`. This refuses both to
+    /// keep payouts from being stopped by an account that never signs.
     pub fn __constructor(
         env: Env,
         governance: Address,
@@ -85,6 +96,9 @@ impl ZakatPool {
         if governance == authority {
             return Err(Error::RolesOverlap);
         }
+        if authority == env.current_contract_address() || authority == policy {
+            return Err(Error::AuthorityCannotSign);
+        }
         // The `policy` can only be accepted if it names this pool as its controller,
         // as in a repoint.
         require_controller(&env, &policy)?;
@@ -101,9 +115,19 @@ impl ZakatPool {
         let mut assets = Vec::new(&env);
         assets.push_back(asset.clone());
         storage.set(&DataKey::ApprovedAssets, &assets);
-        env.storage()
-            .persistent()
-            .set(&DataKey::CategoryBalances(asset), &empty_buckets(&env));
+        env.storage().persistent().set(
+            &DataKey::CategoryBalances(asset.clone()),
+            &empty_buckets(&env),
+        );
+
+        PoolConfigured {
+            governance,
+            authority,
+            policy,
+            asset,
+            timelock_ledgers,
+        }
+        .publish(&env);
 
         for recipient in recipients.iter() {
             approve_recipient(&env, &recipient)?;
@@ -284,67 +308,72 @@ impl ZakatPool {
     ///
     /// Only one change can be queued at a time. This keeps a single slot to
     /// guarantee each change is executed or cancelled before the next is proposed.
+    ///
+    /// A change can only be queued if it passes the checks it must pass at
+    /// execution. This checks it twice to keep a bad value from waiting out the
+    /// delay in the only slot.
     pub fn propose_change(env: Env, change: Change) -> Result<u32, Error> {
         Self::governance(env.clone()).require_auth();
         let storage = env.storage().instance();
         if storage.has(&DataKey::PendingChange) {
             return Err(Error::ChangeAlreadyPending);
         }
+        check_change(&env, &change)?;
         let execute_after = env
             .ledger()
             .sequence()
             .checked_add(Self::timelock_ledgers(env.clone()))
+            .ok_or(Error::Overflow)?;
+        let execute_until = execute_after
+            .checked_add(CHANGE_WINDOW_LEDGERS)
             .ok_or(Error::Overflow)?;
         storage.set(
             &DataKey::PendingChange,
             &PendingChange {
                 change: change.clone(),
                 execute_after,
+                execute_until,
             },
         );
         ChangeProposed {
             change,
             execute_after,
+            execute_until,
         }
         .publish(&env);
         Ok(execute_after)
     }
 
     /// Applies the queued change when governance authorises it and the ledger is
-    /// past its `execute_after`.
+    /// past its `execute_after` and not past its `execute_until`.
+    ///
+    /// The change is checked again before it is applied. This repeats the checks to
+    /// guarantee the change still holds against the state it now meets.
     pub fn execute_change(env: Env) -> Result<(), Error> {
         Self::governance(env.clone()).require_auth();
         let PendingChange {
             change,
             execute_after,
+            execute_until,
         } = Self::pending_change(env.clone()).ok_or(Error::NoPendingChange)?;
-        if env.ledger().sequence() <= execute_after {
+        let ledger = env.ledger().sequence();
+        if ledger <= execute_after {
             return Err(Error::TimelockNotElapsed);
         }
+        if ledger > execute_until {
+            return Err(Error::ChangeExpired);
+        }
+        check_change(&env, &change)?;
 
         let storage = env.storage().instance();
         match change.clone() {
-            Change::SetPolicy(address) => {
-                require_controller(&env, &address)?;
-                storage.set(&DataKey::PolicyAddr, &address);
-            }
-            Change::SetAuthority(address) => {
-                if address == Self::governance(env.clone()) {
-                    return Err(Error::RolesOverlap);
-                }
-                if Self::is_approved_recipient(env.clone(), address.clone()) {
-                    return Err(Error::RecipientIsRole);
-                }
-                storage.set(&DataKey::Authority, &address);
-            }
+            Change::SetPolicy(address) => storage.set(&DataKey::PolicyAddr, &address),
+            Change::SetAuthority(address) => storage.set(&DataKey::Authority, &address),
             Change::ApproveAsset(asset) => {
                 storage.try_update(&DataKey::ApprovedAssets, |stored: Option<Vec<Address>>| {
                     let mut assets = stored.unwrap_or_else(|| Vec::new(&env));
-                    if assets.contains(&asset) {
-                        return Err(Error::AssetAlreadyApproved);
-                    }
                     assets.push_back(asset.clone());
-                    Ok(assets)
+                    Ok::<_, Error>(assets)
                 })?;
                 env.storage()
                     .persistent()
@@ -391,6 +420,7 @@ impl ZakatPool {
         let PendingChange {
             change,
             execute_after,
+            ..
         } = Self::pending_change(env.clone()).ok_or(Error::NoPendingChange)?;
         env.storage().instance().remove(&DataKey::PendingChange);
         ChangeCancelled {
@@ -424,7 +454,16 @@ impl ZakatPool {
     pub fn is_approved_recipient(env: Env, recipient: Address) -> bool {
         env.storage()
             .persistent()
-            .has(&DataKey::ApprovedRecipient(recipient))
+            .get(&DataKey::ApprovedRecipient(recipient))
+            .unwrap_or(false)
+    }
+
+    /// Returns whether `recipient` was removed, which bars it for good.
+    pub fn is_removed_recipient(env: Env, recipient: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ApprovedRecipient(recipient))
+            == Some(false)
     }
 
     pub fn governance(env: Env) -> Address {
@@ -480,9 +519,58 @@ fn empty_buckets(env: &Env) -> Vec<i128> {
     buckets
 }
 
-/// Approves `recipient` and emits the event, unless it is the pool, governance,
-/// the approval multisig or already approved.
-fn approve_recipient(env: &Env, recipient: &Address) -> Result<(), Error> {
+/// Rejects `change` unless it would be accepted now.
+///
+/// The check is run when the change is proposed and again when it executes. This
+/// keeps one list of checks to guarantee both points refuse the same values.
+fn check_change(env: &Env, change: &Change) -> Result<(), Error> {
+    match change {
+        Change::SetPolicy(address) => require_controller(env, address),
+        Change::SetAuthority(address) => {
+            if *address == ZakatPool::governance(env.clone()) {
+                return Err(Error::RolesOverlap);
+            }
+            if *address == env.current_contract_address()
+                || *address == ZakatPool::policy(env.clone())
+            {
+                return Err(Error::AuthorityCannotSign);
+            }
+            if ZakatPool::is_approved_recipient(env.clone(), address.clone()) {
+                return Err(Error::RecipientIsRole);
+            }
+            Ok(())
+        }
+        Change::ApproveAsset(asset) => {
+            if ZakatPool::is_approved(env.clone(), asset.clone()) {
+                return Err(Error::AssetAlreadyApproved);
+            }
+            Ok(())
+        }
+        Change::SetAllocation(allocation) => {
+            match policy_client(env).try_check_allocation(allocation) {
+                Ok(Ok(())) => Ok(()),
+                _ => Err(Error::PolicyRefused),
+            }
+        }
+        Change::SetParameters(parameters) => {
+            match policy_client(env).try_check_parameters(parameters) {
+                Ok(Ok(())) => Ok(()),
+                _ => Err(Error::PolicyRefused),
+            }
+        }
+        Change::ApproveRecipient(recipient) => check_approvable(env, recipient),
+        Change::RemoveRecipient(recipient) => {
+            if !ZakatPool::is_approved_recipient(env.clone(), recipient.clone()) {
+                return Err(Error::RecipientNotApproved);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Rejects `recipient` if it is the pool, governance, the approval multisig,
+/// already approved or removed.
+fn check_approvable(env: &Env, recipient: &Address) -> Result<(), Error> {
     if *recipient == env.current_contract_address() {
         return Err(Error::SelfDistribution);
     }
@@ -491,12 +579,24 @@ fn approve_recipient(env: &Env, recipient: &Address) -> Result<(), Error> {
     {
         return Err(Error::RecipientIsRole);
     }
-    let key = DataKey::ApprovedRecipient(recipient.clone());
-    let storage = env.storage().persistent();
-    if storage.has(&key) {
-        return Err(Error::RecipientAlreadyApproved);
+    match env
+        .storage()
+        .persistent()
+        .get::<_, bool>(&DataKey::ApprovedRecipient(recipient.clone()))
+    {
+        Some(true) => Err(Error::RecipientAlreadyApproved),
+        Some(false) => Err(Error::RecipientRemoved),
+        None => Ok(()),
     }
-    storage.set(&key, &true);
+}
+
+/// Approves `recipient` and emits the event, unless [`check_approvable`] refuses
+/// it.
+fn approve_recipient(env: &Env, recipient: &Address) -> Result<(), Error> {
+    check_approvable(env, recipient)?;
+    env.storage()
+        .persistent()
+        .set(&DataKey::ApprovedRecipient(recipient.clone()), &true);
     RecipientApproved {
         recipient: recipient.clone(),
     }
@@ -504,14 +604,18 @@ fn approve_recipient(env: &Env, recipient: &Address) -> Result<(), Error> {
     Ok(())
 }
 
-/// Removes `recipient` and emits the event naming `by`, unless it is not approved.
+/// Removes `recipient` for good and emits the event naming `by`, unless it is not
+/// approved.
+///
+/// A removed recipient is kept as `false`, never deleted. This bars it from a
+/// later approval to guarantee no approval signed before the removal can pay it.
 fn remove_recipient(env: &Env, recipient: &Address, by: Address) -> Result<(), Error> {
-    let key = DataKey::ApprovedRecipient(recipient.clone());
-    let storage = env.storage().persistent();
-    if !storage.has(&key) {
+    if !ZakatPool::is_approved_recipient(env.clone(), recipient.clone()) {
         return Err(Error::RecipientNotApproved);
     }
-    storage.remove(&key);
+    env.storage()
+        .persistent()
+        .set(&DataKey::ApprovedRecipient(recipient.clone()), &false);
     RecipientRemoved {
         recipient: recipient.clone(),
         by,

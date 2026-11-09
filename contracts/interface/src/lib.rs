@@ -96,6 +96,10 @@ pub trait PolicyInterface {
     fn set_allocation(env: Env, allocation: Allocation);
     /// Replaces the parameters when the controller authorises it.
     fn set_parameters(env: Env, parameters: Parameters);
+    /// Returns the refusal that `set_allocation` would give, without storing.
+    fn check_allocation(env: Env, allocation: Allocation);
+    /// Returns the refusal that `set_parameters` would give, without storing.
+    fn check_parameters(env: Env, parameters: Parameters);
     /// Returns the one address that the setters answer to.
     fn controller(env: Env) -> Address;
 }

@@ -44,14 +44,15 @@ enum DataKey {
     Parameters,
 }
 
+/// The refusals that `policy` returns, numbered 30 to 39.
+///
+/// A number can only be used by one of the two contracts. This keeps `policy`
+/// inside 30 to 39 to let a failed transaction name its contract without
+/// ambiguity.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    /// The amount is not positive.
-    InvalidAmount = 2,
-    /// The arithmetic overflows.
-    Overflow = 4,
     /// The split does not have exactly 8 elements.
     SplitLength = 30,
     /// The split does not sum to 10,000 basis points.
@@ -69,6 +70,10 @@ pub enum Error {
     RemainderToAdministrators = 36,
     /// The configuration entry is missing.
     Unconfigured = 37,
+    /// The amount is not positive.
+    InvalidAmount = 38,
+    /// The arithmetic overflows.
+    Overflow = 39,
 }
 
 #[contract]
@@ -112,6 +117,22 @@ impl Policy {
             .instance()
             .set(&DataKey::Parameters, &parameters);
         Ok(())
+    }
+
+    /// Returns the refusal that `set_allocation` would give `allocation`, or
+    /// nothing when it would be accepted.
+    ///
+    /// The check can be made by anyone and stores nothing. This lets the pool
+    /// check a queued split when it is proposed to keep a bad value from waiting
+    /// out the timelock.
+    pub fn check_allocation(env: Env, allocation: Allocation) -> Result<(), Error> {
+        check(&allocation, &Self::parameters(env))
+    }
+
+    /// Returns the refusal that `set_parameters` would give `parameters`, or
+    /// nothing when they would be accepted.
+    pub fn check_parameters(env: Env, parameters: Parameters) -> Result<(), Error> {
+        check(&Self::allocation(env), &parameters)
     }
 
     /// Splits `amount` into 8 amounts in [`Category`] order.

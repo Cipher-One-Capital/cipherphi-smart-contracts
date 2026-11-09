@@ -426,3 +426,56 @@ fn the_deploy_script_encodes_arguments_as_the_contract_decodes_them() {
         "0000001100000001000000040000000f0000000c616d696c5f6361705f62707300000003000004e20000000f000000106469736368617267655f74696d696e6700000003000000000000000f0000000b6e697361625f62617369730000000003000000000000000f00000008726174655f62707300000003000000fa"
     );
 }
+
+#[test]
+fn every_error_number_sits_between_30_and_39() {
+    // The pool holds every other number. This pins the range to keep a failed
+    // transaction naming its contract by number alone.
+    let all = [
+        Error::SplitLength,
+        Error::SplitSum,
+        Error::RemainderWithoutShare,
+        Error::AmilCapOutOfBand,
+        Error::RateOutOfBand,
+        Error::AdministratorsAboveCap,
+        Error::RemainderToAdministrators,
+        Error::Unconfigured,
+        Error::InvalidAmount,
+        Error::Overflow,
+    ];
+    for (offset, error) in all.iter().enumerate() {
+        assert_eq!(*error as u32, 30 + offset as u32);
+    }
+}
+
+#[test]
+fn a_check_gives_the_setters_answer_and_stores_nothing() {
+    let (env, id, _) = setup();
+    let client = PolicyClient::new(&env, &id);
+    let next = allocation(
+        &env,
+        &[2500, 2500, 1000, 500, 500, 1500, 1000, 500],
+        Category::Poor,
+    );
+    assert_eq!(client.try_check_allocation(&next), Ok(Ok(())));
+    let bad = allocation(&env, &[1, 1, 1, 1, 1, 1, 1, 1], Category::Poor);
+    assert_eq!(client.try_check_allocation(&bad), Err(Ok(Error::SplitSum)));
+
+    let mut low_cap = parameters();
+    low_cap.amil_cap_bps = 500;
+    assert_eq!(
+        client.try_check_parameters(&low_cap),
+        Err(Ok(Error::AdministratorsAboveCap))
+    );
+    let mut silver = parameters();
+    silver.nisab_basis = NisabBasis::Silver;
+    assert_eq!(client.try_check_parameters(&silver), Ok(Ok(())));
+
+    // A check needs no authorisation and leaves both halves as they were.
+    assert!(env.auths().is_empty());
+    assert_eq!(
+        client.allocation(),
+        allocation(&env, &PLACEHOLDER, Category::Poor)
+    );
+    assert_eq!(client.parameters(), parameters());
+}

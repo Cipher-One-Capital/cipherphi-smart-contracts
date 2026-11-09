@@ -4,7 +4,7 @@ Onchain zakat collection and redistribution on Stellar.
 
 Donors calculate and pay their zakat into a pooled Soroban contract, and can verify from the Stellar ledger that their category was distributed to a recipient whose payout the Foundation's signers approved before the funds moved. Zakat is pooled by construction, so the claim is category-level, and the architecture keeps it that way throughout.
 
-CipherPhi is the onchain layer for the Swiss Zakat Foundation, a federally supervised Swiss foundation collecting and redistributing zakat since its founding deed of 6 July 2021, audited annually and entirely community funded.
+CipherPhi is the onchain layer for the Swiss Zakat Foundation, a federally supervised Swiss foundation collecting and redistributing zakat since its charter of 27 March 2020, audited annually and entirely community funded.
 
 ## Status
 
@@ -25,12 +25,12 @@ CipherPhi is composed of two Soroban contracts and two Foundation multisigs:
 
 ## Testnet
 
-The revision 5 contracts run on Stellar testnet with Circle's testnet USDC, built reproducibly from this repository and checked against the network. They are unaudited, handle no real funds, and every key is a test key.
+The revision 6 contracts run on Stellar testnet with Circle's testnet USDC, built reproducibly from this repository and checked against the network. They are unaudited, handle no real funds, and every key is a test key.
 
 | Contract | Address | Wasm hash |
 | --- | --- | --- |
-| `zakat_pool` | [`CAQE5QMVPPRDAUC74XJELAIZIVKZ2NHQHATR73EKMZIGXMLPK6ND6HIN`](https://stellar.expert/explorer/testnet/contract/CAQE5QMVPPRDAUC74XJELAIZIVKZ2NHQHATR73EKMZIGXMLPK6ND6HIN) | `5b7559d13778e35567ca3dc470d5543f13be3ba9986c96b42ecb863822afb613` |
-| `policy` | [`CDU3226YBRAC725VV3AUMEQNU2H7E7JN4JF5MFFSSWFRZBD7O4KMM47I`](https://stellar.expert/explorer/testnet/contract/CDU3226YBRAC725VV3AUMEQNU2H7E7JN4JF5MFFSSWFRZBD7O4KMM47I) | `2186bddb84ad64efbe29d011fe1fec1e38a003c86df4c5911f2ad22f206ca892` |
+| `zakat_pool` | [`CD62NFTTDSBS7JVCOOJMU2ANGV7UQME6ZFBVQQBHOPVSHELOAP5C3DMN`](https://stellar.expert/explorer/testnet/contract/CD62NFTTDSBS7JVCOOJMU2ANGV7UQME6ZFBVQQBHOPVSHELOAP5C3DMN) | `8b4a6d14a817d22e4acacb18496114aa2c33f9c986b12e52abaea2c58c2b9f2a` |
+| `policy` | [`CBDFTJOZCMTV5U7YLSLXCZXO33QMUZVZFRNLHJJPTHHUWT5PDW2UXNAN`](https://stellar.expert/explorer/testnet/contract/CBDFTJOZCMTV5U7YLSLXCZXO33QMUZVZFRNLHJJPTHHUWT5PDW2UXNAN) | `96a0922e3b8896aa9f9ab138f5fdbecd8d637db48bf44dfc2d090f1fc0c54779` |
 
 Governance [`GCL2VC…PLXX`](https://stellar.expert/explorer/testnet/account/GCL2VCSOWEF6XUCBCD6TQ5URQAE3R4NAGRPEBZ7VGKPGMMQI6VM3PLXX) and the approval multisig [`GCP4SH…2BMV`](https://stellar.expert/explorer/testnet/account/GCP4SHHS7A2JA4KH6S4V3UTEDI263Z34RHSF6TE63DUAMTVN2XYG2BMV) are 2-of-3 accounts with the master key at weight 0. The pool's one approved recipient is the test partner [`GD6O4N…3NQR`](https://stellar.expert/explorer/testnet/account/GD6O4NBIFK2PVUM2CMJIPYX5PWBM74GXF4ASXYLAQRO4C7IA5WJI3NQR). The `policy` split and parameters are placeholders, not validated by the Shariah authority.
 
@@ -38,7 +38,7 @@ A clickable demo of give, split, release and check still runs the revision 3 des
 
 ## Revisions
 
-The architecture has been through five review cycles. The first three left the structure as first submitted and changed what the design was run against, security review and platform checks, and the corrections those found. The fourth locked the architecture and simplified it: payout approval moved from a separate contract and a distributor key to a Foundation multisig the network checks directly. This moves approval to the Foundation's own signers to match how a Swiss foundation signs.
+The architecture has been through six review cycles. The first three left the structure as first submitted and changed what the design was run against, security review and platform checks, and the corrections those found. The fourth locked the architecture and simplified it: payout approval moved from a separate contract and a distributor key to a Foundation multisig the network checks directly. This moves approval to the Foundation's own signers to match how a Swiss foundation signs.
 
 | ID | Logs | Branches |
 | --- | --- | --- |
@@ -46,11 +46,12 @@ The architecture has been through five review cycles. The first three left the s
 | 2 | Findings of an internal pre-implementation security review folded in, the review's attribution and its internal scope stated, references turned into real footnotes, and the CAP-71 credential migration named in the toolchain pin. | [`docs/architecture-security-review`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/docs/architecture-security-review), [`docs/review-claim-accuracy`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/docs/review-claim-accuracy), [`docs/cap-71-credentials`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/docs/cap-71-credentials), [`docs/readme-and-license`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/docs/readme-and-license) |
 | 3 | Corrupted text and inconsistencies repaired, a platform correction on Stellar transaction ordering, monitoring and issuer-freeze detection made concrete, and figures added. | [`docs/architecture-revision-3`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/docs/architecture-revision-3), [`rev-3/transaction-ordering-rationale`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/rev-3/transaction-ordering-rationale) |
 | 4 | Architecture locked. Payout approval by a Foundation 2-of-3 multisig checked by the network, replacing the `attestation` contract, the attestation struct and the distributor key. Governance made Foundation-only 2-of-3, with the approval multisig able to cancel any pending change. The pool deploys with contributions paused until both multisigs are verified, and checks its `policy` controller at construction. Storage, function, parameter, toolchain and provenance sections brought in line with the code, and the figures updated from their Excalidraw source, now kept in `static/figures.excalidraw`. | [`rev-4/architecture-lock`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/rev-4/architecture-lock) |
-| 5 | Recipient allow-list on `zakat_pool`. A payout can only reach a recipient that governance approved, at deployment or under the timelock, so stolen approval keys can no longer pay an address the thief picks. The approval multisig can remove a recipient at once, which also voids approvals signed before the removal. New errors continue from 40, leaving 30 to 39 to `policy`. Every read-modify-write now goes through `try_update`, and a missing configuration entry fails with a typed error instead of a bare panic. Needs a new deployment, as `zakat_pool` has no upgrade path. | [`rev-5/recipient-allowlist`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/rev-5/recipient-allowlist) |
+| 5 | Recipient allow-list on `zakat_pool`. A payout can only reach a recipient that governance approved, at deployment or under the timelock, so stolen approval keys can no longer pay an address the thief picks. The approval multisig can remove a recipient at once, which stops approvals signed before the removal from paying while the recipient stays removed. New errors continue from 40, leaving 30 to 39 to `policy`. Every read-modify-write now goes through `try_update`, and a missing configuration entry fails with a typed error instead of a bare panic. Needs a new deployment, as `zakat_pool` has no upgrade path. | [`rev-5/recipient-allowlist`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/rev-5/recipient-allowlist), [`rev-5/checklist-fixes`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/rev-5/checklist-fixes) |
+| 6 | Fixes from the revision 5 QA assessment. A recipient removal is final, so an approval signed before it can never pay out. A queued change is checked when proposed as well as when executed, and can only execute within 7 days of becoming executable. The approval multisig cannot be the pool or `policy`. The constructor emits a configuration event. `policy` errors renumbered so that all of them sit in 30 to 39. soroban-sdk 29, matching Protocol 29 on mainnet. CI pinned by commit and exact toolchain, checks built hashes against this README, and fuzzes nightly across 2 assets. Needs a new deployment. | [`rev-6/qa-fixes`](https://github.com/bits-and-blocks/cipherphi-smart-contracts/tree/rev-6/qa-fixes) |
 
 ## Stack
 
-- Stellar Soroban, Rust to Wasm on the soroban-sdk 27
+- Stellar Soroban, Rust to Wasm on the soroban-sdk 29
 - Stellar Asset Contract custody, USDC first with EURC planned
 - Stellar multisig accounts for governance and payout approval, 2 of 3 Foundation signers each, with thresholds enforced by the network
 - Privy embedded wallets, with the Stellar Wallets Kit as the named fallback

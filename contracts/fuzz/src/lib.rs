@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A harness that both fuzz targets share, holding the real contracts and the solvency
-//! invariant they assert after every call.
+//! A harness that both fuzz targets share, holding the real contracts, 2 approved
+//! assets and the solvency invariant they assert after every call.
 
 use policy::{Allocation, DischargeTiming, NisabBasis, Parameters, Policy, PolicyArgs};
 use soroban_sdk::{
@@ -9,7 +9,7 @@ use soroban_sdk::{
     token, Address, Env, IntoVal, InvokeError, Vec,
 };
 use zakat_pool::{
-    Category, Error, ZakatPool, ZakatPoolArgs, ZakatPoolClient, MIN_TIMELOCK_LEDGERS,
+    Category, Change, Error, ZakatPool, ZakatPoolArgs, ZakatPoolClient, MIN_TIMELOCK_LEDGERS,
 };
 
 pub const START_LEDGER: u32 = 100;
@@ -28,11 +28,14 @@ pub struct Harness {
     pub env: Env,
     pub pool: Address,
     pub asset: Address,
+    /// A second asset, approved through the timelock after construction.
+    pub asset2: Address,
     pub donor: Address,
     pub recipient: Address,
     /// An address that governance never approved as a recipient.
     pub stranger: Address,
     pub authority: Address,
+    pub governance: Address,
 }
 
 impl Harness {
@@ -41,6 +44,13 @@ impl Harness {
         env.mock_all_auths();
         env.cost_estimate().budget().reset_unlimited();
         env.ledger().set_sequence_number(START_LEDGER);
+        // This raises the TTL limits to let up to 17 timelocked changes run without any
+        // entry being archived.
+        env.ledger().with_mut(|l| {
+            l.min_persistent_entry_ttl = 4_000_000;
+            l.min_temp_entry_ttl = 4_000_000;
+            l.max_entry_ttl = 6_000_000;
+        });
 
         let donor = Address::generate(&env);
         let recipient = Address::generate(&env);
@@ -49,6 +59,11 @@ impl Harness {
             .register_stellar_asset_contract_v2(Address::generate(&env))
             .address();
         token::StellarAssetClient::new(&env, &asset).mint(&donor, &(i64::MAX as i128));
+        let asset2 = env
+            .register_stellar_asset_contract_v2(Address::generate(&env))
+            .address();
+        token::StellarAssetClient::new(&env, &asset2).mint(&donor, &(i64::MAX as i128));
+        let governance = Address::generate(&env);
 
         // The approval account, used to model whether the account approved.
         // Its 2-of-3 threshold can only be enforced by Stellar and is not modelled here.
@@ -75,7 +90,7 @@ impl Harness {
             &pool,
             ZakatPool,
             ZakatPoolArgs::__constructor(
-                &Address::generate(&env),
+                &governance,
                 &authority,
                 &policy,
                 &asset,
@@ -87,14 +102,44 @@ impl Harness {
         // This opens it as governance would to let contributions through.
         ZakatPoolClient::new(&env, &pool).resume_contributions();
 
-        Self {
+        let h = Self {
             env,
             pool,
             asset,
+            asset2,
             donor,
             recipient,
             stranger,
             authority,
+            governance,
+        };
+        h.queue_and_execute(&Change::ApproveAsset(h.asset2.clone()))
+            .expect("the second asset is approved");
+        h
+    }
+
+    /// Returns the asset at `index`: the first when even, the second when odd.
+    pub fn asset_at(&self, index: u8) -> &Address {
+        if index.is_multiple_of(2) {
+            &self.asset
+        } else {
+            &self.asset2
+        }
+    }
+
+    /// Proposes `change`, moves the ledger past the delay and executes it.
+    pub fn queue_and_execute(&self, change: &Change) -> Result<(), Error> {
+        let client = self.client();
+        let execute_after = match client.try_propose_change(change) {
+            Ok(Ok(after)) => after,
+            Err(Ok(error)) => return Err(error),
+            other => panic!("propose_change failed in the host: {other:?}"),
+        };
+        self.env.ledger().set_sequence_number(execute_after + 1);
+        match client.try_execute_change() {
+            Ok(_) => Ok(()),
+            Err(Ok(error)) => Err(error),
+            Err(Err(error)) => panic!("execute_change failed in the host: {error:?}"),
         }
     }
 
@@ -103,28 +148,40 @@ impl Harness {
     }
 
     pub fn claimed(&self) -> i128 {
-        self.client().balances(&self.asset).iter().sum()
+        self.claimed_in(&self.asset)
     }
 
     pub fn held(&self) -> i128 {
-        token::Client::new(&self.env, &self.asset).balance(&self.pool)
+        self.held_in(&self.asset)
     }
 
-    /// Asserts that the buckets never exceed the balance and that no bucket is negative.
+    pub fn claimed_in(&self, asset: &Address) -> i128 {
+        self.client().balances(asset).iter().sum()
+    }
+
+    pub fn held_in(&self, asset: &Address) -> i128 {
+        token::Client::new(&self.env, asset).balance(&self.pool)
+    }
+
+    /// Asserts, for both assets, that the buckets never exceed the balance and that no
+    /// bucket is negative.
     pub fn assert_invariant(&self) {
-        let claimed = self.claimed();
-        let held = self.held();
-        assert!(claimed <= held, "buckets {claimed} above balance {held}");
-        assert!(self.client().balances(&self.asset).iter().all(|b| b >= 0));
+        for asset in [&self.asset, &self.asset2] {
+            let claimed = self.claimed_in(asset);
+            let held = self.held_in(asset);
+            assert!(claimed <= held, "buckets {claimed} above balance {held}");
+            assert!(self.client().balances(asset).iter().all(|b| b >= 0));
+        }
     }
 
-    /// Attempts a payout of `amount` from `category` to `to`, with the approval
+    /// Attempts a payout of `amount` of `asset` from `category` to `to`, with the approval
     /// account's authorisation of the `approved` arguments when `approved` is set, and with
     /// no authorisation at all otherwise.
     /// The approved arguments can be different from the submitted ones.
     pub fn try_distribute(
         &self,
         to: &Address,
+        asset: &Address,
         category: Category,
         amount: i128,
         approved: Option<(Address, Address, i128, Category)>,
@@ -143,9 +200,7 @@ impl Harness {
             })
             .collect();
         self.env.mock_auths(&mocks);
-        let result = self
-            .client()
-            .try_distribute(to, &self.asset, &amount, &category);
+        let result = self.client().try_distribute(to, asset, &amount, &category);
         self.env.mock_all_auths();
         result
     }
