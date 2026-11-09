@@ -323,6 +323,19 @@ fn governance_cannot_also_be_the_approval_multisig() {
 }
 
 #[test]
+fn the_pool_and_the_policy_cannot_be_the_approval_multisig_at_construction() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let pick: [Pick; 2] = [|r| r.pool.clone(), |r| r.policy.clone()];
+    for authority in pick {
+        let mut r = roles(&env);
+        r.authority = authority(&r);
+        let message = refusal_of(|| deploy(&env, &r, &Vec::new(&env)));
+        assert_refused(&message, Error::AuthorityCannotSign as u32);
+    }
+}
+
+#[test]
 fn the_pool_is_deployed_closed_to_contributions() {
     let f = setup_paused();
     assert_eq!(
@@ -853,12 +866,15 @@ fn pause_blocks_contribute_at_once_and_does_not_block_distribute() {
 #[test]
 fn resume_reopens_contributions() {
     let f = setup();
+    assert!(!f.client().is_paused());
     f.client().pause_contributions();
+    assert!(f.client().is_paused());
     f.client().resume_contributions();
     assert_eq!(
         f.env.events().all().filter_by_contract(&f.pool),
         std::vec![ContributionsResumed {}.to_xdr(&f.env, &f.pool)]
     );
+    assert!(!f.client().is_paused());
     f.give();
 }
 
@@ -996,6 +1012,7 @@ fn a_change_executes_after_the_delay_and_each_step_emits_its_event() {
         std::vec![ChangeProposed {
             change: change.clone(),
             execute_after,
+            execute_until: execute_after + CHANGE_WINDOW_LEDGERS,
         }
         .to_xdr(&f.env, &f.pool)]
     );
@@ -1199,16 +1216,21 @@ fn governance_cannot_reach_around_the_pool_to_the_policy() {
 }
 
 #[test]
-fn a_value_the_policy_refuses_fails_at_execution_and_stays_queued() {
+fn a_value_the_policy_refuses_is_refused_at_proposal() {
     let f = setup();
     let bad = allocation(&f.env, &[1, 1, 1, 1, 1, 1, 1, 1]);
-    let execute_after = f.client().propose_change(&Change::SetAllocation(bad));
-    f.past_timelock(execute_after);
+    f.refuse_proposal(&Change::SetAllocation(bad), Error::PolicyRefused);
+    let mut bad = parameters();
+    bad.rate_bps = 0;
+    f.refuse_proposal(&Change::SetParameters(bad), Error::PolicyRefused);
     assert_eq!(
-        f.client().try_execute_change(),
-        Err(Ok(Error::PolicyRefused))
+        PolicyClient::new(&f.env, &f.policy).allocation(),
+        allocation(&f.env, &PLACEHOLDER)
     );
-    assert!(f.client().pending_change().is_some());
+    assert_eq!(
+        PolicyClient::new(&f.env, &f.policy).parameters(),
+        parameters()
+    );
 }
 
 #[test]
@@ -1249,29 +1271,19 @@ fn policy_repoints_through_the_timelock() {
 }
 
 #[test]
-fn a_policy_answering_to_someone_else_is_refused_and_stays_queued() {
+fn a_policy_answering_to_someone_else_is_refused_at_proposal() {
     let f = setup();
     let rogue = policy_answering_to(&f, &f.governance);
-    let after = f.client().propose_change(&Change::SetPolicy(rogue));
-    f.past_timelock(after);
-    assert_eq!(
-        f.client().try_execute_change(),
-        Err(Ok(Error::PolicyControllerMismatch))
-    );
+    f.refuse_proposal(&Change::SetPolicy(rogue), Error::PolicyControllerMismatch);
     assert_eq!(f.client().policy(), f.policy);
-    assert!(f.client().pending_change().is_some());
 }
 
 #[test]
 fn a_policy_address_with_no_contract_is_refused() {
     let f = setup();
-    let after = f
-        .client()
-        .propose_change(&Change::SetPolicy(Address::generate(&f.env)));
-    f.past_timelock(after);
-    assert_eq!(
-        f.client().try_execute_change(),
-        Err(Ok(Error::PolicyControllerMismatch))
+    f.refuse_proposal(
+        &Change::SetPolicy(Address::generate(&f.env)),
+        Error::PolicyControllerMismatch,
     );
     assert_eq!(f.client().policy(), f.policy);
 }
@@ -1298,14 +1310,19 @@ fn a_new_approval_multisig_takes_the_delay_and_then_alone_approves() {
 #[test]
 fn governance_cannot_become_the_approval_multisig() {
     let f = setup();
-    let after = f
-        .client()
-        .propose_change(&Change::SetAuthority(f.governance.clone()));
-    f.past_timelock(after);
-    assert_eq!(
-        f.client().try_execute_change(),
-        Err(Ok(Error::RolesOverlap))
+    f.refuse_proposal(
+        &Change::SetAuthority(f.governance.clone()),
+        Error::RolesOverlap,
     );
+    assert_eq!(f.client().authority(), f.authority);
+}
+
+#[test]
+fn the_pool_and_the_policy_cannot_become_the_approval_multisig() {
+    let f = setup();
+    for address in [f.pool.clone(), f.policy.clone()] {
+        f.refuse_proposal(&Change::SetAuthority(address), Error::AuthorityCannotSign);
+    }
     assert_eq!(f.client().authority(), f.authority);
 }
 
@@ -1337,13 +1354,9 @@ fn approving_an_asset_goes_through_the_timelock_and_gives_it_its_own_buckets() {
 #[test]
 fn approving_an_approved_asset_is_refused() {
     let f = setup();
-    let after = f
-        .client()
-        .propose_change(&Change::ApproveAsset(f.asset.clone()));
-    f.past_timelock(after);
-    assert_eq!(
-        f.client().try_execute_change(),
-        Err(Ok(Error::AssetAlreadyApproved))
+    f.refuse_proposal(
+        &Change::ApproveAsset(f.asset.clone()),
+        Error::AssetAlreadyApproved,
     );
 }
 
@@ -1366,6 +1379,7 @@ fn a_queued_change_survives_in_instance_storage() {
         Some(PendingChange {
             change,
             execute_after,
+            execute_until: execute_after + CHANGE_WINDOW_LEDGERS,
         })
     );
 }
@@ -1543,6 +1557,15 @@ impl Fixture {
         assert_eq!(self.token().balance(recipient), paid_before);
     }
 
+    /// Proposes `change` and asserts the error `want`, an empty queue and an unmoved
+    /// pool.
+    fn refuse_proposal(&self, change: &Change, want: Error) {
+        let before = self.state();
+        assert_eq!(self.client().try_propose_change(change), Err(Ok(want)));
+        assert_eq!(self.state(), before, "a refused proposal moved the pool");
+        assert_eq!(self.client().pending_change(), None);
+    }
+
     /// Queues `change`, waits out the delay and returns the result of executing it.
     fn queue_and_execute(&self, change: &Change) -> Result<(), Error> {
         let execute_after = self.client().propose_change(change);
@@ -1579,6 +1602,18 @@ fn roles(env: &Env) -> Roles {
             .register_stellar_asset_contract_v2(Address::generate(env))
             .address(),
     }
+}
+
+/// Returns the configuration event that a pool deployed with `roles` emits.
+fn configured(env: &Env, roles: &Roles) -> soroban_sdk::xdr::ContractEvent {
+    PoolConfigured {
+        governance: roles.governance.clone(),
+        authority: roles.authority.clone(),
+        policy: roles.policy.clone(),
+        asset: roles.asset.clone(),
+        timelock_ledgers: TIMELOCK,
+    }
+    .to_xdr(env, &roles.pool)
 }
 
 /// Deploys a pool at `roles.pool` that approves `recipients` at construction.
@@ -1623,14 +1658,14 @@ fn an_empty_list_of_recipients_is_accepted_and_approves_no_one() {
     deploy(&env, &r, &Vec::new(&env));
     assert_eq!(
         env.events().all().filter_by_contract(&r.pool),
-        std::vec::Vec::<soroban_sdk::xdr::ContractEvent>::new()
+        std::vec![configured(&env, &r)]
     );
     let pool = ZakatPoolClient::new(&env, &r.pool);
     assert!(!pool.is_approved_recipient(&Address::generate(&env)));
 }
 
 #[test]
-fn the_constructor_emits_one_approval_event_per_recipient() {
+fn the_constructor_emits_its_configuration_then_one_approval_event_per_recipient() {
     let env = Env::default();
     env.mock_all_auths();
     let r = roles(&env);
@@ -1639,6 +1674,7 @@ fn the_constructor_emits_one_approval_event_per_recipient() {
     assert_eq!(
         env.events().all().filter_by_contract(&r.pool),
         std::vec![
+            configured(&env, &r),
             RecipientApproved {
                 recipient: first.clone()
             }
@@ -1739,7 +1775,7 @@ fn either_role_can_cancel_an_approval_of_a_recipient() {
 }
 
 #[test]
-fn approving_the_pool_the_roles_or_an_approved_recipient_is_refused_and_stays_queued() {
+fn approving_the_pool_the_roles_or_an_approved_recipient_is_refused_at_proposal() {
     let f = setup();
     let cases = [
         (f.pool.clone(), Error::SelfDistribution),
@@ -1748,10 +1784,7 @@ fn approving_the_pool_the_roles_or_an_approved_recipient_is_refused_and_stays_qu
         (f.recipient.clone(), Error::RecipientAlreadyApproved),
     ];
     for (address, want) in cases {
-        let change = Change::ApproveRecipient(address.clone());
-        assert_eq!(f.queue_and_execute(&change), Err(want));
-        assert_eq!(f.client().pending_change().map(|p| p.change), Some(change));
-        f.client().cancel_change(&f.governance);
+        f.refuse_proposal(&Change::ApproveRecipient(address), want);
     }
     assert!(!f.client().is_approved_recipient(&f.pool));
     assert!(!f.client().is_approved_recipient(&f.governance));
@@ -1850,20 +1883,101 @@ fn removing_a_recipient_that_is_not_approved_is_refused() {
         f.client().try_remove_recipient(&f.authority, &stranger),
         Err(Ok(Error::RecipientNotApproved))
     );
-    let change = Change::RemoveRecipient(stranger);
-    assert_eq!(
-        f.queue_and_execute(&change),
-        Err(Error::RecipientNotApproved)
+    f.refuse_proposal(
+        &Change::RemoveRecipient(stranger),
+        Error::RecipientNotApproved,
     );
-    assert_eq!(f.client().pending_change().map(|p| p.change), Some(change));
 }
 
 #[test]
 fn an_approved_recipient_cannot_become_the_approval_multisig() {
     let f = setup();
-    assert_eq!(
-        f.queue_and_execute(&Change::SetAuthority(f.recipient.clone())),
-        Err(Error::RecipientIsRole)
+    f.refuse_proposal(
+        &Change::SetAuthority(f.recipient.clone()),
+        Error::RecipientIsRole,
     );
     assert_eq!(f.client().authority(), f.authority);
+}
+
+#[test]
+fn a_removal_is_final_and_the_recipient_cannot_be_approved_again() {
+    for by_timelock in [false, true] {
+        let f = setup();
+        f.give();
+        // The signers approve a payout, and the recipient is removed before it is
+        // submitted.
+        let approved = f.payout(10);
+        if by_timelock {
+            assert_eq!(
+                f.queue_and_execute(&Change::RemoveRecipient(f.recipient.clone())),
+                Ok(())
+            );
+        } else {
+            f.client().remove_recipient(&f.authority, &f.recipient);
+        }
+        assert!(f.client().is_removed_recipient(&f.recipient));
+        assert!(!f.client().is_approved_recipient(&f.recipient));
+
+        // A re-approval cannot be queued, so the old approval cannot come back.
+        f.refuse_proposal(
+            &Change::ApproveRecipient(f.recipient.clone()),
+            Error::RecipientRemoved,
+        );
+        f.env
+            .ledger()
+            .set_sequence_number(START_LEDGER + 3 * TIMELOCK);
+        assert!(!f.submit_with_approval(&f.authority, approved.clone(), approved));
+        f.refuse_approved(&f.recipient, Error::RecipientNotApproved);
+    }
+}
+
+#[test]
+fn a_change_that_no_longer_holds_is_refused_at_execution_and_stays_queued() {
+    let f = setup();
+    let change = Change::RemoveRecipient(f.recipient.clone());
+    let execute_after = f.client().propose_change(&change);
+    // The approval multisig removes the recipient at once while the change waits.
+    f.client().remove_recipient(&f.authority, &f.recipient);
+    f.past_timelock(execute_after);
+    assert_eq!(
+        f.client().try_execute_change(),
+        Err(Ok(Error::RecipientNotApproved))
+    );
+    assert_eq!(f.client().pending_change().map(|p| p.change), Some(change));
+}
+
+#[test]
+fn a_change_executes_on_its_last_ledger_and_expires_after_it() {
+    let f = setup();
+    let change = Change::SetAllocation(next_allocation(&f));
+    let execute_after = f.client().propose_change(&change);
+    let execute_until = execute_after + CHANGE_WINDOW_LEDGERS;
+    assert_eq!(
+        f.client().pending_change().map(|p| p.execute_until),
+        Some(execute_until)
+    );
+
+    f.env.ledger().set_sequence_number(execute_until + 1);
+    let before = f.state();
+    assert_eq!(
+        f.client().try_execute_change(),
+        Err(Ok(Error::ChangeExpired))
+    );
+    assert_eq!(f.state(), before);
+    assert_eq!(
+        PolicyClient::new(&f.env, &f.policy).allocation(),
+        allocation(&f.env, &PLACEHOLDER)
+    );
+
+    // An expired change can only be cancelled, which frees the slot.
+    f.client().cancel_change(&f.authority);
+    let execute_after = f.client().propose_change(&change);
+    f.env
+        .ledger()
+        .set_sequence_number(execute_after + CHANGE_WINDOW_LEDGERS);
+    f.client().execute_change();
+    assert_eq!(
+        PolicyClient::new(&f.env, &f.policy).allocation(),
+        next_allocation(&f)
+    );
 }

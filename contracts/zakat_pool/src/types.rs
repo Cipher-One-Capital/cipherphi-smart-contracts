@@ -24,7 +24,11 @@ pub enum DataKey {
     PendingChange,
     /// The persistent entry that holds the 8 buckets of one approved asset.
     CategoryBalances(Address),
-    /// The persistent entry that marks one recipient as approved by governance.
+    /// The persistent entry that marks one recipient as approved by governance
+    /// (`true`) or removed for good (`false`).
+    ///
+    /// A removed recipient can never be approved again. This keeps the entry after
+    /// a removal to guarantee no approval signed before it can ever pay out.
     ApprovedRecipient(Address),
 }
 
@@ -50,6 +54,8 @@ pub struct PendingChange {
     pub change: Change,
     /// The ledger after which the change may execute.
     pub execute_after: u32,
+    /// The last ledger on which the change may execute.
+    pub execute_until: u32,
 }
 
 /// The refusals that the pool returns, one variant per refusal.
@@ -118,6 +124,26 @@ pub enum Error {
     RecipientIsRole = 42,
     /// The configuration entry is missing.
     Unconfigured = 43,
+    /// The queued change has passed its `execute_until` ledger.
+    ChangeExpired = 44,
+    /// The approval account is the pool or the `policy` contract.
+    AuthorityCannotSign = 45,
+    /// The recipient was removed, and a removal is final.
+    RecipientRemoved = 46,
+}
+
+/// The event that the constructor emits, with the configuration it stores.
+///
+/// This records the roles, the policy, the first asset and the delay to let a
+/// reader with only the event stream rebuild the configuration.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PoolConfigured {
+    pub governance: Address,
+    pub authority: Address,
+    pub policy: Address,
+    pub asset: Address,
+    pub timelock_ledgers: u32,
 }
 
 /// The event that `contribute` emits, with the whole split in [`Category`]
@@ -157,6 +183,7 @@ pub struct Disbursement {
 pub struct ChangeProposed {
     pub change: Change,
     pub execute_after: u32,
+    pub execute_until: u32,
 }
 
 #[contractevent]
