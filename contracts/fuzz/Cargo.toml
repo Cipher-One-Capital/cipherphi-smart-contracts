@@ -12,7 +12,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
-soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+soroban-sdk = { version = "29.0.1", features = ["testutils"] }
 cipherphi_interface = { path = "../interface" }
 zakat_pool = { path = "../zakat_pool" }
 policy = { path = "../policy" }

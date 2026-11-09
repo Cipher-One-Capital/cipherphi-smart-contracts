@@ -13,7 +13,7 @@ publish = false
 license = "Apache-2.0"
 
 [workspace.dependencies]
-soroban-sdk = "27.0.6"
+soroban-sdk = "29.0.1"
 cipherphi_interface = { path = "interface" }
 policy = { path = "policy" }
 
