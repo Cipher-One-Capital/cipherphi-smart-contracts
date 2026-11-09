@@ -25,12 +25,12 @@ CipherPhi is composed of two Soroban contracts and two Foundation multisigs:
 
 ## Testnet
 
-The revision 5 contracts run on Stellar testnet with Circle's testnet USDC, built reproducibly from this repository and checked against the network. They are unaudited, handle no real funds, and every key is a test key.
+The revision 6 contracts run on Stellar testnet with Circle's testnet USDC, built reproducibly from this repository and checked against the network. They are unaudited, handle no real funds, and every key is a test key.
 
 | Contract | Address | Wasm hash |
 | --- | --- | --- |
-| `zakat_pool` | [`CAQE5QMVPPRDAUC74XJELAIZIVKZ2NHQHATR73EKMZIGXMLPK6ND6HIN`](https://stellar.expert/explorer/testnet/contract/CAQE5QMVPPRDAUC74XJELAIZIVKZ2NHQHATR73EKMZIGXMLPK6ND6HIN) | `5b7559d13778e35567ca3dc470d5543f13be3ba9986c96b42ecb863822afb613` |
-| `policy` | [`CDU3226YBRAC725VV3AUMEQNU2H7E7JN4JF5MFFSSWFRZBD7O4KMM47I`](https://stellar.expert/explorer/testnet/contract/CDU3226YBRAC725VV3AUMEQNU2H7E7JN4JF5MFFSSWFRZBD7O4KMM47I) | `2186bddb84ad64efbe29d011fe1fec1e38a003c86df4c5911f2ad22f206ca892` |
+| `zakat_pool` | [`CD62NFTTDSBS7JVCOOJMU2ANGV7UQME6ZFBVQQBHOPVSHELOAP5C3DMN`](https://stellar.expert/explorer/testnet/contract/CD62NFTTDSBS7JVCOOJMU2ANGV7UQME6ZFBVQQBHOPVSHELOAP5C3DMN) | `8b4a6d14a817d22e4acacb18496114aa2c33f9c986b12e52abaea2c58c2b9f2a` |
+| `policy` | [`CBDFTJOZCMTV5U7YLSLXCZXO33QMUZVZFRNLHJJPTHHUWT5PDW2UXNAN`](https://stellar.expert/explorer/testnet/contract/CBDFTJOZCMTV5U7YLSLXCZXO33QMUZVZFRNLHJJPTHHUWT5PDW2UXNAN) | `96a0922e3b8896aa9f9ab138f5fdbecd8d637db48bf44dfc2d090f1fc0c54779` |
 
 Governance [`GCL2VC…PLXX`](https://stellar.expert/explorer/testnet/account/GCL2VCSOWEF6XUCBCD6TQ5URQAE3R4NAGRPEBZ7VGKPGMMQI6VM3PLXX) and the approval multisig [`GCP4SH…2BMV`](https://stellar.expert/explorer/testnet/account/GCP4SHHS7A2JA4KH6S4V3UTEDI263Z34RHSF6TE63DUAMTVN2XYG2BMV) are 2-of-3 accounts with the master key at weight 0. The pool's one approved recipient is the test partner [`GD6O4N…3NQR`](https://stellar.expert/explorer/testnet/account/GD6O4NBIFK2PVUM2CMJIPYX5PWBM74GXF4ASXYLAQRO4C7IA5WJI3NQR). The `policy` split and parameters are placeholders, not validated by the Shariah authority.
 
